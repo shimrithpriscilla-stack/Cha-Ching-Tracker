@@ -1,5 +1,6 @@
 import * as pdfjsLib from 'pdfjs-dist'
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs`
+
 import { useState, useRef, useCallback } from 'react'
 import { Upload, FileText, AlertTriangle, CheckCircle, Trash2, ChevronDown } from 'lucide-react'
 import { supabase } from '../supabase'
