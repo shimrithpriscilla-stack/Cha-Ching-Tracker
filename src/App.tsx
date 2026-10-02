@@ -21,7 +21,7 @@ const PAGES: Record<string, React.ReactElement> = {
 export default function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [loading, setLoading] = useState(true)
-  const [activePage, setActivePage] = useState('income')
+  const [activePage, setActivePage] = useState(() => localStorage.getItem('cc-page') || 'income')
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {

@@ -39,7 +39,7 @@ export default function AppLayout({ children, activePage, setActivePage, userEma
           {navItems.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
-              onClick={() => setActivePage(id)}
+              onClick={() => { setActivePage(id); localStorage.setItem('cc-page', id) }}
               className={`flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all w-full text-left
                 ${activePage === id ? 'bg-[#C8DDD0] text-[#7FA68A]' : 'text-gray-500 hover:bg-gray-100'}`}
             >
@@ -74,7 +74,7 @@ export default function AppLayout({ children, activePage, setActivePage, userEma
         {navItems.map(({ id, label, icon: Icon }) => (
           <button
             key={id}
-            onClick={() => setActivePage(id)}
+            onClick={() => { setActivePage(id); localStorage.setItem('cc-page', id) }}
             className={`flex-1 flex flex-col items-center justify-center py-3 gap-1 text-xs font-medium transition-all
               ${activePage === id ? 'text-[#7FA68A]' : 'text-gray-400'}`}
           >

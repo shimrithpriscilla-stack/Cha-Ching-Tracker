@@ -347,7 +347,7 @@ export default function Import() {
       </div>
 
       {/* Drop zone */}
-      {rows.length === 0 && (
+      {rows.length === 0 && !loading && (
         <div
           onDrop={onDrop}
           onDragOver={e => { e.preventDefault(); setDragging(true) }}
