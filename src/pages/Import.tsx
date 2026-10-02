@@ -435,29 +435,55 @@ export default function Import() {
     const utrs = parsed.map(r => r.utrNo).filter(Boolean)
     let existingUtrs = new Set<string>()
     if (utrs.length > 0) {
+      // Fetch all stored UTRs from the notes field (stored as "UTR:XXXXXXXXX | source")
+      // We pull all notes containing "UTR:" and extract the numbers client-side
       const { data } = await supabase
         .from('transactions')
         .select('notes')
-        .like('notes', 'UTR:%')
+        .like('notes', '%UTR:%')
       existingUtrs = new Set(
         (data ?? [])
-          .map(r => {
-            const match = r.notes?.match(/UTR:(\S+)/)
-            return match ? match[1] : ''
+          .flatMap(r => {
+            const m = (r.notes ?? '').match(/UTR:(\S+)/)
+            return m ? [m[1].replace(/\|.*$/, '').trim()] : []
           })
-          .filter(Boolean)
       )
     }
 
-    setLoadingMsg('Loading categories…')
-    const { data: catData } = await supabase.from('categories').select('id, name').order('name')
-    const cats = catData ?? []
+    setLoadingMsg('Loading categories & note history…')
+    const [catResult, noteHistoryResult] = await Promise.all([
+      supabase.from('categories').select('id, name').order('name'),
+      // Fetch merchant→most recent note mapping for auto-suggest
+      supabase
+        .from('transactions')
+        .select('merchant, notes, created_at')
+        .not('notes', 'is', null)
+        .not('notes', 'eq', '')
+        .order('created_at', { ascending: false })
+        .limit(500),
+    ])
+    const cats = catResult.data ?? []
+
+    // Build merchant → last user note map (strip UTR/source metadata parts)
+    const merchantNoteMap = new Map<string, string>()
+    for (const row of (noteHistoryResult.data ?? [])) {
+      const merchant = (row.merchant ?? '').trim().toLowerCase()
+      if (!merchant) continue
+      if (merchantNoteMap.has(merchant)) continue // already have most recent
+      // Extract the user-written note part (before the first " | UTR:" or " | PhonePe" etc.)
+      const noteParts = (row.notes ?? '').split(' | ')
+      const userNote = noteParts.find(p => !p.startsWith('UTR:') && p !== 'PhonePe' && p !== 'GPay' && p !== 'Paytm' && p.trim() !== '')
+      if (userNote) merchantNoteMap.set(merchant, userNote.trim())
+    }
 
     const withMeta: ParsedRow[] = parsed.map(r => {
       const { category, type } = autoCategory(r.description)
       const cat = cats.find(c => c.name === category)
+      // Auto-suggest note from history if not already parsed from PDF
+      const suggestedNote = r.note || merchantNoteMap.get(r.description.trim().toLowerCase()) || ''
       return {
         ...r,
+        note: suggestedNote,
         isDuplicate: existingUtrs.has(r.utrNo),
         category_id: cat?.id ?? '',
         spending_type: type,
@@ -672,8 +698,12 @@ export default function Import() {
                           onChange={e => updateRow(row.id, 'description', e.target.value)} />
                       </td>
                       <td className="px-3 py-2.5 max-w-40">
-                        <input className="w-full text-xs text-gray-500 bg-transparent outline-none focus:bg-gray-50 rounded px-1 truncate placeholder:text-gray-300"
+                        <input className={`w-full text-xs rounded px-1 truncate outline-none placeholder:text-gray-300
+                          ${row.note
+                            ? 'text-gray-700 bg-[#F5F2EC] focus:bg-[#EDE9E0]'
+                            : 'text-gray-500 bg-transparent focus:bg-gray-50'}`}
                           placeholder="add note…"
+                          title={row.note ? 'Auto-suggested from previous import' : ''}
                           value={row.note}
                           onChange={e => updateRow(row.id, 'note', e.target.value)} />
                       </td>
