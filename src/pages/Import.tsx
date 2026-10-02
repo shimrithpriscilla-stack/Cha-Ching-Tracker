@@ -12,6 +12,7 @@ interface ParsedRow {
   amount: number
   type: 'debit' | 'credit'
   utrNo: string
+  note: string
   source: string
   isDuplicate: boolean
   category_id: string
@@ -39,6 +40,7 @@ function parsePhonePe(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_i
     let desc = ''
     let j = i + 2
     let utrNo = ''
+    let note = ''
     while (j < lines.length) {
       if (lines[j].startsWith('Transaction ID')) { j++; continue }
       if (lines[j].startsWith('UTR No')) {
@@ -49,6 +51,10 @@ function parsePhonePe(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_i
       if (lines[j] === 'Credit' || lines[j] === 'Debit') break
       if (lines[j].startsWith('Page ')) break
       if (lines[j].startsWith('This is a system')) break
+      if (/^notes?:/i.test(lines[j])) {
+        note = lines[j].replace(/^notes?:\s*/i, '').trim()
+        j++; continue
+      }
       desc += (desc ? ' ' : '') + lines[j]
       j++
     }
@@ -81,7 +87,7 @@ function parsePhonePe(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_i
       .replace(/^Payment Received\s*/i, 'Received')
       .trim()
 
-    rows.push({ id: utrNo || `pp-${Date.now()}-${rows.length}`, date: dateISO, description: cleanDesc, amount, type, utrNo, source: 'PhonePe' })
+    rows.push({ id: utrNo || `pp-${Date.now()}-${rows.length}`, date: dateISO, description: cleanDesc, amount, type, utrNo, note, source: 'PhonePe' })
     i = k
   }
   return rows
@@ -132,7 +138,7 @@ function parseGPay(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' 
     const dateISO = isNaN(dateObj.getTime()) ? '' : dateObj.toISOString().slice(0, 10)
     if (!dateISO) { i = k + 1; continue }
 
-    rows.push({ id: utrNo || `gp-${Date.now()}-${rows.length}`, date: dateISO, description: cleanDesc, amount, type, utrNo, source: 'GPay' })
+    rows.push({ id: utrNo || `gp-${Date.now()}-${rows.length}`, date: dateISO, description: cleanDesc, amount, type, utrNo, note: '', source: 'GPay' })
     i = k + 1
   }
   return rows
@@ -153,6 +159,7 @@ function parsePaytm(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_id'
 
     let desc = ''
     let utrNo = ''
+    let note = ''
     let type: 'debit' | 'credit' = 'debit'
     let amtStr = ''
     let j = i + 2
@@ -164,7 +171,8 @@ function parsePaytm(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_id'
         utrNo = l.replace('UPI Ref No:', '').trim()
         j++; continue
       }
-      if (l.startsWith('Note:') || l.startsWith('Tag:') || l.startsWith('#')) { j++; continue }
+      if (/^notes?:/i.test(l)) { note = l.replace(/^notes?:\s*/i, '').trim(); j++; continue }
+      if (l.startsWith('Tag:') || l.startsWith('#')) { j++; continue }
       if (l.startsWith('Axis Bank') || l.startsWith('- Rs.') || l.startsWith('+ Rs.')) {
         if (l.startsWith('- Rs.')) { type = 'debit'; amtStr = l.replace('- Rs.', '').replace(/,/g, '').trim() }
         if (l.startsWith('+ Rs.')) { type = 'credit'; amtStr = l.replace('+ Rs.', '').replace(/,/g, '').trim() }
@@ -190,7 +198,7 @@ function parsePaytm(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_id'
     const dateISO = dateObj.toISOString().slice(0, 10)
 
     const cleanDesc = desc.replace(/^Paid to\s+/i, '').replace(/^Received from\s+/i, '').trim()
-    rows.push({ id: utrNo, date: dateISO, description: cleanDesc, amount, type, utrNo, source: 'Paytm' })
+    rows.push({ id: utrNo, date: dateISO, description: cleanDesc, amount, type, utrNo, note, source: 'Paytm' })
     i = j
   }
   return rows
@@ -498,12 +506,11 @@ export default function Import() {
 
     const records = toInsert.map(r => ({
       date: r.date,
-      description: r.description,
+      merchant: r.description,
       amount: r.amount,
-      type: r.type,
-      category_id: r.category_id || null,
       spending_type: r.spending_type,
-      notes: r.utrNo ? `UTR:${r.utrNo} | ${r.source}` : r.source,
+      category_id: r.category_id || null,
+      notes: [r.note, r.utrNo ? `UTR:${r.utrNo}` : '', r.source].filter(Boolean).join(' | '),
     }))
 
     const { error: insertError } = await supabase.from('transactions').insert(records)
