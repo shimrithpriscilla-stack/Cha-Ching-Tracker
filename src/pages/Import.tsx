@@ -254,9 +254,11 @@ function CategorySelect({ rowId, categories, value, onSelect, onNewCategory }: I
     setCatError('')
     setSaving(true)
     try {
-      const { data, error } = await supabase
+      const { data: { user } } = await supabase.auth.getUser()
+    if (!user) { setCatError('Not logged in'); setSaving(false); return }
+    const { data, error } = await supabase
         .from('categories')
-        .insert({ name })
+        .insert({ name, user_id: user.id })
         .select('id, name')
         .single()
       if (error) { setCatError(error.message); setSaving(false); return }
