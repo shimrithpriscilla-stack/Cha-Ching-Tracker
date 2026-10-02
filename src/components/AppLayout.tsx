@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { IndianRupee, Receipt, Layers, PieChart, BarChart3 } from 'lucide-react'
+import { IndianRupee, Receipt, Layers, PieChart, BarChart3, Upload } from 'lucide-react'
 
 const navItems = [
   { id: 'income', label: 'Income', icon: IndianRupee },
@@ -7,6 +7,7 @@ const navItems = [
   { id: 'budgets', label: 'Budgets', icon: Layers },
   { id: 'analysis', label: 'Analysis', icon: PieChart },
   { id: 'compare', label: 'Compare', icon: BarChart3 },
+    { id: 'import', label: 'Import', icon: Upload },
 ]
 
 interface Props {
