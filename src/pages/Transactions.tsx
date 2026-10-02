@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../supabase'
-import { Plus, Search, Edit2, Trash2, Settings2 } from 'lucide-react'
+import { Plus, Search, Edit2, Trash2 } from 'lucide-react'
 
 interface Transaction {
   id: string
