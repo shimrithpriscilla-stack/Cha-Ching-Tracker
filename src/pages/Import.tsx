@@ -647,6 +647,7 @@ export default function Import() {
                     </th>
                     <th className="px-3 py-3 text-left">Date</th>
                     <th className="px-3 py-3 text-left">Description</th>
+                    <th className="px-3 py-3 text-left">Notes</th>
                     <th className="px-3 py-3 text-left">Amount</th>
                     <th className="px-3 py-3 text-left">Category</th>
                     <th className="px-3 py-3 text-left">Type</th>
@@ -669,6 +670,12 @@ export default function Import() {
                         <input className="w-full text-gray-800 bg-transparent outline-none focus:bg-gray-50 rounded px-1 truncate"
                           value={row.description}
                           onChange={e => updateRow(row.id, 'description', e.target.value)} />
+                      </td>
+                      <td className="px-3 py-2.5 max-w-40">
+                        <input className="w-full text-xs text-gray-500 bg-transparent outline-none focus:bg-gray-50 rounded px-1 truncate placeholder:text-gray-300"
+                          placeholder="add note…"
+                          value={row.note}
+                          onChange={e => updateRow(row.id, 'note', e.target.value)} />
                       </td>
                       <td className="px-3 py-2.5 whitespace-nowrap">
                         <span className={row.type === 'credit' ? 'text-[#7FA68A] font-medium' : 'text-gray-800'}>
