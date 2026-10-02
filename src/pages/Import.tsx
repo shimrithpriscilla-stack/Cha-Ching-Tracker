@@ -1,8 +1,8 @@
 import * as pdfjsLib from 'pdfjs-dist'
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs`
 
-import { useState, useRef, useCallback } from 'react'
-import { Upload, FileText, AlertTriangle, CheckCircle, Trash2, ChevronDown } from 'lucide-react'
+import { useState } from 'react'
+import { Upload, AlertTriangle, CheckCircle, Trash2 } from 'lucide-react'
 import { supabase } from '../supabase'
 
 interface ParsedRow {
@@ -21,33 +21,22 @@ interface ParsedRow {
 
 interface Category { id: string; name: string }
 
-// ── Parsers ──────────────────────────────────────────────────────────────────
-
 function parsePhonePe(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
   const rows: Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] = []
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
-
   let i = 0
   while (i < lines.length) {
-    // Date line: "Oct 05, 2025"
     const dateLine = lines[i]
     const dateMatch = dateLine.match(/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}$/)
     if (!dateMatch) { i++; continue }
-
-    // Time line: "02:46 PM"
     const timeLine = lines[i + 1] ?? ''
     if (!timeLine.match(/\d{2}:\d{2}\s*(AM|PM)/i)) { i++; continue }
-
-    // Description lines until "Credit" or "Debit"
     let desc = ''
     let j = i + 2
     let utrNo = ''
     while (j < lines.length) {
       if (lines[j].startsWith('Transaction ID')) { j++; continue }
-      if (lines[j].startsWith('UTR No')) {
-        utrNo = lines[j].replace('UTR No :', '').replace('UTR No:', '').trim()
-        j++; continue
-      }
+      if (lines[j].startsWith('UTR No')) { utrNo = lines[j].replace('UTR No :', '').replace('UTR No:', '').trim(); j++; continue }
       if (lines[j].startsWith('Debited from') || lines[j].startsWith('Credited to')) { j++; continue }
       if (lines[j] === 'Credit' || lines[j] === 'Debit') break
       if (lines[j].startsWith('Page ')) break
@@ -55,37 +44,24 @@ function parsePhonePe(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_i
       desc += (desc ? ' ' : '') + lines[j]
       j++
     }
-
     const typeStr = lines[j] ?? ''
     if (typeStr !== 'Credit' && typeStr !== 'Debit') { i = j + 1; continue }
     const type = typeStr === 'Credit' ? 'credit' : 'debit'
-
-    // Amount: next line(s) — handle split amounts like "INR \r\n50000.00"
     let amtStr = ''
     let k = j + 1
     while (k < lines.length) {
       const l = lines[k]
       if (l.startsWith('INR')) { amtStr = l.replace('INR', '').trim(); k++; break }
-      if (/^\d[\d,]*(\.\d+)?$/.test(l) && amtStr === '') { amtStr = l; k++; break }
-      if (/^\d[\d,]*(\.\d+)?$/.test(l)) { amtStr += l; k++; break }
+      if (/^\d[\d,]*(\..+)?$/.test(l) && amtStr === '') { amtStr = l; k++; break }
       break
     }
     if (!amtStr) { i = k; continue }
-
     const amount = parseFloat(amtStr.replace(/,/g, ''))
     if (isNaN(amount) || amount <= 0) { i = k; continue }
-
     const dateObj = new Date(dateLine)
     const dateISO = isNaN(dateObj.getTime()) ? '' : dateObj.toISOString().slice(0, 10)
     if (!dateISO) { i = k; continue }
-
-    // Clean description
-    const cleanDesc = desc
-      .replace(/^Paid to\s+/i, '')
-      .replace(/^Received from\s+/i, '')
-      .replace(/^Payment Received\s*/i, 'Received')
-      .trim()
-
+    const cleanDesc = desc.replace(/^Paid to\s+/i, '').replace(/^Received from\s+/i, '').replace(/^Payment Received\s*/i, 'Received').trim()
     rows.push({ id: utrNo || `pp-${Date.now()}-${rows.length}`, date: dateISO, description: cleanDesc, amount, type, utrNo, source: 'PhonePe' })
     i = k
   }
@@ -95,121 +71,85 @@ function parsePhonePe(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_i
 function parseGPay(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
   const rows: Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] = []
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
-
   let i = 0
   while (i < lines.length) {
-    // Date line: "02 Apr, 2026"
     const dateLine = lines[i]
     const dateMatch = dateLine.match(/^(\d{2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec),\s+(\d{4})$/)
     if (!dateMatch) { i++; continue }
-
     const timeLine = lines[i + 1] ?? ''
     if (!timeLine.match(/\d{2}:\d{2}\s*(AM|PM)/i)) { i++; continue }
-
-    // Next line: "Paid to X" or "Received from X" or "Self transfer to X"
     const descLine = lines[i + 2] ?? ''
     let type: 'debit' | 'credit' = 'debit'
     if (descLine.toLowerCase().startsWith('received from')) type = 'credit'
-    else if (descLine.toLowerCase().startsWith('self transfer')) type = 'debit'
-
-    // UPI Transaction ID line
     const upiLine = lines[i + 3] ?? ''
     const upiMatch = upiLine.match(/UPI Transaction ID:\s*(\S+)/)
     const utrNo = upiMatch ? upiMatch[1] : ''
-
-    // Amount line: "₹993" or "₹1,700"
     let amtStr = ''
     let k = i + 4
     while (k < lines.length && k < i + 8) {
       const l = lines[k]
-      if (l.startsWith('₹')) { amtStr = l.replace('₹', '').replace(/,/g, '').trim(); break }
+      if (l.startsWith('\u20b9')) { amtStr = l.replace('\u20b9', '').replace(/,/g, '').trim(); break }
       k++
     }
     if (!amtStr) { i = k + 1; continue }
-
     const amount = parseFloat(amtStr)
     if (isNaN(amount) || amount <= 0) { i = k + 1; continue }
-
-    const cleanDesc = descLine
-      .replace(/^Paid to\s+/i, '')
-      .replace(/^Received from\s+/i, '')
-      .replace(/^Self transfer to\s+/i, 'Self Transfer → ')
-      .trim()
-
+    const cleanDesc = descLine.replace(/^Paid to\s+/i, '').replace(/^Received from\s+/i, '').replace(/^Self transfer to\s+/i, 'Self Transfer \u2192 ').trim()
     const dateStr = `${dateMatch[1]} ${dateMatch[2]} ${dateMatch[3]}`
     const dateObj = new Date(dateStr)
     const dateISO = isNaN(dateObj.getTime()) ? '' : dateObj.toISOString().slice(0, 10)
     if (!dateISO) { i = k + 1; continue }
-
     rows.push({ id: utrNo || `gp-${Date.now()}-${rows.length}`, date: dateISO, description: cleanDesc, amount, type, utrNo, source: 'GPay' })
     i = k + 1
   }
   return rows
 }
+
 function parsePaytm(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
   const rows: Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] = []
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
-
   let i = 0
   while (i < lines.length) {
-    // Date line: "30 Sep" or "09 Oct"
     const dateLine = lines[i]
     const dateMatch = dateLine.match(/^(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)$/)
     if (!dateMatch) { i++; continue }
-
-    // Time line: "12:44 PM"
     const timeLine = lines[i + 1] ?? ''
     if (!timeLine.match(/\d{1,2}:\d{2}\s*(AM|PM)/i)) { i++; continue }
-
-    // Description lines until "UPI Ref No"
-    let desc = ''
-    let utrNo = ''
-    let type: 'debit' | 'credit' = 'debit'
-    let amtStr = ''
+    let desc = ''; let utrNo = ''; let type: 'debit' | 'credit' = 'debit'; let amtStr = ''
     let j = i + 2
-
     while (j < lines.length) {
       const l = lines[j]
       if (l.startsWith('UPI ID:')) { j++; continue }
-      if (l.startsWith('UPI Ref No:')) {
-        utrNo = l.replace('UPI Ref No:', '').trim()
-        j++; continue
-      }
+      if (l.startsWith('UPI Ref No:')) { utrNo = l.replace('UPI Ref No:', '').trim(); j++; continue }
       if (l.startsWith('Note:') || l.startsWith('Tag:') || l.startsWith('#')) { j++; continue }
       if (l.startsWith('Axis Bank') || l.startsWith('- Rs.') || l.startsWith('+ Rs.')) {
         if (l.startsWith('- Rs.')) { type = 'debit'; amtStr = l.replace('- Rs.', '').replace(/,/g, '').trim() }
         if (l.startsWith('+ Rs.')) { type = 'credit'; amtStr = l.replace('+ Rs.', '').replace(/,/g, '').trim() }
         j++
-        // Amount might be on next line if split
         if (!amtStr && lines[j]) { amtStr = lines[j].replace(/,/g, '').trim(); j++ }
         break
       }
       if (l.startsWith('Page ') || l.startsWith('For any queries') || l.startsWith('Passbook')) break
-      if (!desc) desc = l
-      else desc += ' ' + l
+      if (!desc) desc = l; else desc += ' ' + l
       j++
     }
-
     if (!amtStr || !utrNo) { i = j; continue }
     const amount = parseFloat(amtStr)
     if (isNaN(amount) || amount <= 0) { i = j; continue }
-
-    // Build date: "30 Sep" + guess year from context
     const currentYear = new Date().getFullYear()
     const monthNum = new Date(`${dateMatch[2]} 1`).getMonth()
     const day = parseInt(dateMatch[1])
     const dateObj = new Date(currentYear, monthNum, day)
-    // If date is in future, use previous year
     if (dateObj > new Date()) dateObj.setFullYear(currentYear - 1)
     const dateISO = dateObj.toISOString().slice(0, 10)
-
     const cleanDesc = desc.replace(/^Paid to\s+/i, '').replace(/^Received from\s+/i, '').trim()
     rows.push({ id: utrNo, date: dateISO, description: cleanDesc, amount, type, utrNo, source: 'Paytm' })
     i = j
   }
   return rows
 }
-function detectAndParse(text: string, _filename: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
+
+function detectAndParse(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
   if (text.includes('Paytm Statement') || text.includes('Passbook Payments History')) return parsePaytm(text)
   if (text.includes('PhonePe') || text.includes('UTR No')) return parsePhonePe(text)
   if (text.includes('Google Pay') || text.includes('UPI Transaction ID')) return parseGPay(text)
@@ -217,8 +157,6 @@ function detectAndParse(text: string, _filename: string): Omit<ParsedRow, 'isDup
   if (pp.length > 0) return pp
   return parseGPay(text)
 }
-
-// ── Auto-categorisation rules ────────────────────────────────────────────────
 
 const RULES: { pattern: RegExp; category: string; type: 'necessary' | 'unnecessary' }[] = [
   { pattern: /swiggy|zomato|domino|pizza|burger|mcdon|kfc|biryani|cafe|bakery|restaurant|food|dining|diner|eat/i, category: 'Dining', type: 'unnecessary' },
@@ -229,17 +167,13 @@ const RULES: { pattern: RegExp; category: string; type: 'necessary' | 'unnecessa
   { pattern: /medical|pharmacy|chemist|hospital|doctor|clinic|dental|health/i, category: 'Health', type: 'necessary' },
   { pattern: /amazon|flipkart|myntra|shopping|store|mall|fashion|clothes|shoes/i, category: 'Shopping', type: 'unnecessary' },
   { pattern: /gift|flowers|jewel|wedding|birthday/i, category: 'Gifting', type: 'unnecessary' },
-  { pattern: /mutual fund|groww|zerodha|iccl|investment|sip/i, category: 'Subscriptions', type: 'necessary' },
+  { pattern: /mutual fund|groww|zerodha|iccl|investment|sip/i, category: 'Investments', type: 'necessary' },
 ]
 
 function autoCategory(desc: string): { category: string; type: 'necessary' | 'unnecessary' } {
-  for (const rule of RULES) {
-    if (rule.pattern.test(desc)) return { category: rule.category, type: rule.type }
-  }
+  for (const rule of RULES) { if (rule.pattern.test(desc)) return { category: rule.category, type: rule.type } }
   return { category: '', type: 'necessary' }
 }
-
-// ── Component ────────────────────────────────────────────────────────────────
 
 function fmt(n: number) {
   return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(n)
@@ -250,180 +184,179 @@ export default function Import() {
   const [categories, setCategories] = useState<Category[]>([])
   const [dragging, setDragging] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [loadingMsg, setLoadingMsg] = useState('Reading your statement\u2026')
   const [committing, setCommitting] = useState(false)
   const [committed, setCommitted] = useState(0)
-  const fileRef = useRef<HTMLInputElement>(null)
-
-  async function loadCategories() {
-    const { data } = await supabase.from('categories').select('id, name').order('name')
-    setCategories(data ?? [])
-  }
+  const [error, setError] = useState('')
 
   async function processFile(file: File) {
-  setLoading(true)
-  setCommitted(0)
-  await loadCategories()
-
-  let text = ''
-
-  try {
-    if (file.name.toLowerCase().endsWith('.pdf')) {
-      const arrayBuffer = await file.arrayBuffer()
-      const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) })
-      const pdf = await loadingTask.promise
-      const pages: string[] = []
-      for (let p = 1; p <= pdf.numPages; p++) {
-        const page = await pdf.getPage(p)
-        const content = await page.getTextContent()
-        const pageText = content.items
-          .map((item: any) => ('str' in item ? item.str : ''))
-          .join(' ')
-        pages.push(pageText)
+    setLoading(true); setError(''); setCommitted(0); setLoadingMsg('Reading your statement\u2026')
+    let text = ''
+    try {
+      if (file.name.toLowerCase().endsWith('.pdf')) {
+        setLoadingMsg('Extracting text from PDF\u2026')
+        const arrayBuffer = await file.arrayBuffer()
+        const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) })
+        const pdf = await loadingTask.promise
+        setLoadingMsg(`Processing ${pdf.numPages} pages\u2026`)
+        const pages: string[] = []
+        for (let p = 1; p <= pdf.numPages; p++) {
+          setLoadingMsg(`Reading page ${p} of ${pdf.numPages}\u2026`)
+          const page = await pdf.getPage(p)
+          const content = await page.getTextContent()
+          const pageText = content.items.map((item: any) => ('str' in item ? item.str : '')).join(' ')
+          pages.push(pageText)
+        }
+        text = pages.join('\n')
+      } else {
+        setLoadingMsg('Reading file\u2026')
+        text = await file.text()
       }
-      text = pages.join('\n')
-    } else {
-      text = await file.text()
+    } catch (err) {
+      setError('Could not read this file: ' + (err as Error).message)
+      setLoading(false); return
     }
-  } catch (err) {
-    alert('Could not read this file: ' + (err as Error).message)
-    setLoading(false)
-    return
-  }
-
-  if (!text || text.trim().length < 50) {
-    alert('No text could be extracted from this file. Try the unlocked PDF version.')
-    setLoading(false)
-    return
-  }
-
-  const parsed = detectAndParse(text, file.name)
-
-  if (parsed.length === 0) {
-    alert(`Parsed 0 transactions. File detected as: ${text.includes('PhonePe') ? 'PhonePe' : text.includes('Google Pay') ? 'GPay' : text.includes('Paytm') ? 'Paytm' : 'Unknown'}. Check if the PDF is password-protected or try a different file.`)
-    setLoading(false)
-    return
-  }
-
-  const utrs = parsed.map(r => r.utrNo).filter(Boolean)
-  let existingUtrs = new Set<string>()
-  if (utrs.length > 0) {
-    const { data } = await supabase
-      .from('transactions')
-      .select('notes')
-      .like('notes', 'UTR:%')
-    existingUtrs = new Set((data ?? []).map(r => r.notes.replace('UTR:', '')))
-  }
-
-  const { data: catData } = await supabase.from('categories').select('id, name').order('name')
-  const cats = catData ?? []
-
-  const withMeta: ParsedRow[] = parsed.map(r => {
-    const { category, type } = autoCategory(r.description)
-    const cat = cats.find(c => c.name === category)
-    return {
-      ...r,
-      isDuplicate: existingUtrs.has(r.utrNo),
-      category_id: cat?.id ?? '',
-      spending_type: type,
-      selected: !existingUtrs.has(r.utrNo),
+    if (!text || text.trim().length < 50) {
+      setError('No text could be extracted. Try the unlocked PDF version.')
+      setLoading(false); return
     }
-  })
+    setLoadingMsg('Parsing transactions\u2026')
+    const parsed = detectAndParse(text)
+    if (parsed.length === 0) {
+      const detected = text.includes('PhonePe') ? 'PhonePe' : text.includes('Google Pay') ? 'GPay' : text.includes('Paytm') ? 'Paytm' : 'Unknown'
+      setError(`Parsed 0 transactions. Detected format: ${detected}. Check if the PDF is password-protected or try a different file.`)
+      setLoading(false); return
+    }
+    setLoadingMsg('Checking for duplicates\u2026')
+    const utrs = parsed.map(r => r.utrNo).filter(Boolean)
+    let existingUtrs = new Set<string>()
+    if (utrs.length > 0) {
+      const { data } = await supabase.from('transactions').select('notes').like('notes', 'UTR:%')
+      existingUtrs = new Set((data ?? []).map(r => { const m = r.notes?.match(/UTR:(\S+)/); return m ? m[1] : '' }).filter(Boolean))
+    }
+    setLoadingMsg('Loading categories\u2026')
+    const { data: catData } = await supabase.from('categories').select('id, name').order('name')
+    const cats = catData ?? []
+    const withMeta: ParsedRow[] = parsed.map(r => {
+      const { category, type } = autoCategory(r.description)
+      const cat = cats.find(c => c.name === category)
+      return { ...r, isDuplicate: existingUtrs.has(r.utrNo), category_id: cat?.id ?? '', spending_type: type, selected: !existingUtrs.has(r.utrNo) }
+    })
+    setRows(withMeta); setCategories(cats); setLoading(false)
+  }
 
-  setRows(withMeta)
-  setCategories(cats)
-  setLoading(false)
-}
+  function onDrop(e: React.DragEvent) {
+    e.preventDefault(); setDragging(false)
+    const file = e.dataTransfer.files[0]
+    if (file) processFile(file)
+  }
+
+  function toggleAll() {
+    const nonDup = rows.filter(r => !r.isDuplicate)
+    const allSelected = nonDup.every(r => r.selected)
+    setRows(rows.map(r => r.isDuplicate ? r : { ...r, selected: !allSelected }))
+  }
+
+  function toggleRow(id: string) { setRows(rows.map(r => r.id === id ? { ...r, selected: !r.selected } : r)) }
+  function updateRow(id: string, field: string, value: string) { setRows(rows.map(r => r.id === id ? { ...r, [field]: value } : r)) }
+  function deleteRow(id: string) { setRows(rows.filter(r => r.id !== id)) }
+
+  async function commit() {
+    const toInsert = rows.filter(r => r.selected && !r.isDuplicate)
+    if (toInsert.length === 0) return
+    setCommitting(true)
+    const records = toInsert.map(r => ({
+      date: r.date, description: r.description, amount: r.amount, type: r.type,
+      category_id: r.category_id || null, spending_type: r.spending_type,
+      notes: r.utrNo ? `UTR:${r.utrNo} | ${r.source}` : r.source,
+    }))
+    const { error: insertError } = await supabase.from('transactions').insert(records)
+    setCommitting(false)
+    if (insertError) { setError('Import failed: ' + insertError.message); return }
+    setCommitted(toInsert.length); setRows([])
+  }
 
   const selectedCount = rows.filter(r => r.selected).length
   const dupCount = rows.filter(r => r.isDuplicate).length
-  const debits = rows.filter(r => r.selected && r.type === 'debit')
-  const totalSelected = debits.reduce((s, r) => s + r.amount, 0)
+  const totalSelected = rows.filter(r => r.selected && r.type === 'debit').reduce((s, r) => s + r.amount, 0)
 
   return (
     <div className="p-6 max-w-6xl">
       <div className="mb-6">
         <h1 className="text-2xl font-light text-gray-800" style={{ fontFamily: 'Georgia,serif' }}>Bulk Import</h1>
-        <p className="text-gray-400 text-sm mt-1">Upload your PhonePe, GPay, or Paytm statement. Parsed entirely in your browser — nothing uploaded to any server.</p>
+        <p className="text-gray-400 text-sm mt-1">Upload your PhonePe, GPay, or Paytm statement. Parsed entirely in your browser.</p>
       </div>
 
-      {/* Drop zone */}
-      {rows.length === 0 && !loading && (
-        <div
+      {error && (
+        <div className="mb-4 bg-red-50 border border-red-200 text-red-600 rounded-2xl px-4 py-3 text-sm flex items-start gap-3">
+          <AlertTriangle size={16} className="mt-0.5 flex-shrink-0" />
+          <span>{error}</span>
+          <button onClick={() => setError('')} className="ml-auto text-red-400 hover:text-red-600">\u2715</button>
+        </div>
+      )}
+
+      {rows.length === 0 && !loading && committed === 0 && (
+        <label htmlFor="file-upload"
           onDrop={onDrop}
           onDragOver={e => { e.preventDefault(); setDragging(true) }}
           onDragLeave={() => setDragging(false)}
-          onClick={() => fileRef.current?.click()}
-          className={`border-2 border-dashed rounded-3xl p-16 flex flex-col items-center gap-4 cursor-pointer transition-all
-            ${dragging ? 'border-[#7FA68A] bg-[#C8DDD0]/20' : 'border-gray-200 hover:border-[#7FA68A] hover:bg-gray-50'}`}
+          className={`border-2 border-dashed rounded-3xl p-16 flex flex-col items-center gap-4 cursor-pointer transition-all ${dragging ? 'border-[#7FA68A] bg-[#C8DDD0]/20' : 'border-gray-200 hover:border-[#7FA68A] hover:bg-gray-50'}`}
         >
-          <input ref={fileRef} type="file" accept=".pdf,.csv,.xlsx" className="hidden"
+          <input id="file-upload" type="file" accept=".pdf,.csv,.xlsx" className="hidden"
             onChange={e => { if (e.target.files?.[0]) processFile(e.target.files[0]) }} />
           <div className="w-16 h-16 bg-[#C8DDD0] rounded-2xl flex items-center justify-center">
             <Upload size={28} strokeWidth={1.5} className="text-[#7FA68A]" />
           </div>
           <div className="text-center">
             <div className="text-base font-medium text-gray-700">Drop your statement here</div>
-            <div className="text-sm text-gray-400 mt-1">PhonePe PDF · GPay PDF · Paytm CSV/Excel</div>
+            <div className="text-sm text-gray-400 mt-1">or click to browse</div>
+            <div className="text-xs text-gray-400 mt-1">PhonePe PDF \u00b7 GPay PDF \u00b7 Paytm CSV/Excel/PDF</div>
           </div>
           <div className="flex gap-3">
             {['PhonePe', 'GPay', 'Paytm'].map(app => (
               <span key={app} className="text-xs bg-[#F5F2EC] text-gray-500 px-3 py-1.5 rounded-full">{app}</span>
             ))}
           </div>
-        </div>
+        </label>
       )}
 
       {loading && (
-  <div className="text-center py-20 flex flex-col items-center gap-4">
-    <div className="w-12 h-12 border-4 border-[#C8DDD0] border-t-[#7FA68A] rounded-full animate-spin" />
-    <div className="text-gray-500 text-sm font-medium">Reading your statement…</div>
-    <div className="text-gray-400 text-xs">This may take a few seconds for large PDFs</div>
-  </div>
-)}
+        <div className="text-center py-20 flex flex-col items-center gap-4">
+          <div className="w-12 h-12 border-4 border-[#C8DDD0] border-t-[#7FA68A] rounded-full animate-spin" />
+          <div className="text-gray-600 text-sm font-medium">{loadingMsg}</div>
+          <div className="text-gray-400 text-xs">This may take a few seconds for large PDFs</div>
+        </div>
+      )}
 
       {committed > 0 && rows.length === 0 && (
-        <div className="bg-[#C8DDD0] rounded-2xl p-6 flex items-center gap-4 mt-4">
+        <div className="bg-[#C8DDD0] rounded-2xl p-6 flex items-center gap-4">
           <CheckCircle size={24} className="text-[#7FA68A]" />
           <div>
             <div className="font-semibold text-gray-800">{committed} transactions imported successfully!</div>
             <div className="text-sm text-gray-600 mt-0.5">They're now in your Transaction Ledger.</div>
           </div>
-          <button onClick={() => { setCommitted(0) }} className="ml-auto text-sm text-gray-500 underline">Import another</button>
+          <button onClick={() => setCommitted(0)} className="ml-auto text-sm text-gray-500 underline">Import another</button>
         </div>
       )}
 
       {rows.length > 0 && (
         <>
-          {/* Summary bar */}
           <div className="flex items-center gap-4 mb-4 flex-wrap">
-            <div className="flex gap-3">
-              <div className="bg-[#C8DDD0] rounded-xl px-4 py-2 text-sm">
-                <span className="text-gray-600">Total rows: </span><strong>{rows.length}</strong>
-              </div>
-              <div className="bg-[#D5CEED] rounded-xl px-4 py-2 text-sm">
-                <span className="text-gray-600">Selected: </span><strong>{selectedCount}</strong>
-              </div>
-              {dupCount > 0 && (
-                <div className="bg-[#F0CECE] rounded-xl px-4 py-2 text-sm">
-                  <span className="text-gray-600">Duplicates: </span><strong>{dupCount}</strong>
-                </div>
-              )}
-              <div className="bg-[#F7DEC4] rounded-xl px-4 py-2 text-sm">
-                <span className="text-gray-600">Total spend: </span><strong>{fmt(totalSelected)}</strong>
-              </div>
+            <div className="flex gap-3 flex-wrap">
+              <div className="bg-[#C8DDD0] rounded-xl px-4 py-2 text-sm"><span className="text-gray-600">Total: </span><strong>{rows.length}</strong></div>
+              <div className="bg-[#D5CEED] rounded-xl px-4 py-2 text-sm"><span className="text-gray-600">Selected: </span><strong>{selectedCount}</strong></div>
+              {dupCount > 0 && <div className="bg-[#F0CECE] rounded-xl px-4 py-2 text-sm"><span className="text-gray-600">Duplicates: </span><strong>{dupCount}</strong></div>}
+              <div className="bg-[#F7DEC4] rounded-xl px-4 py-2 text-sm"><span className="text-gray-600">Spend: </span><strong>{fmt(totalSelected)}</strong></div>
             </div>
             <div className="ml-auto flex gap-2">
-              <button onClick={() => setRows([])} className="text-sm text-gray-400 hover:text-gray-600 border border-gray-200 rounded-xl px-4 py-2">
-                Clear
-              </button>
+              <button onClick={() => { setRows([]); setError('') }} className="text-sm text-gray-400 hover:text-gray-600 border border-gray-200 rounded-xl px-4 py-2">Clear</button>
               <button onClick={commit} disabled={committing || selectedCount === 0}
                 className="bg-[#7FA68A] text-white rounded-xl px-6 py-2 text-sm font-medium hover:bg-[#6d9478] disabled:opacity-50 transition-all">
-                {committing ? 'Importing…' : `Import ${selectedCount} transactions`}
+                {committing ? 'Importing\u2026' : `Import ${selectedCount} transactions`}
               </button>
             </div>
           </div>
 
-          {/* Table */}
           <div className="bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -431,7 +364,7 @@ export default function Import() {
                   <tr className="bg-[#F5F2EC] text-xs text-gray-500 uppercase tracking-wide">
                     <th className="px-3 py-3 text-left w-8">
                       <input type="checkbox" onChange={toggleAll}
-                        checked={rows.filter(r => !r.isDuplicate).every(r => r.selected)}
+                        checked={rows.filter(r => !r.isDuplicate).length > 0 && rows.filter(r => !r.isDuplicate).every(r => r.selected)}
                         className="rounded" />
                     </th>
                     <th className="px-3 py-3 text-left">Date</th>
@@ -447,17 +380,14 @@ export default function Import() {
                 <tbody>
                   {rows.map(row => (
                     <tr key={row.id}
-                      className={`border-t border-gray-50 transition-all
-                        ${row.isDuplicate ? 'opacity-50 bg-[#F0CECE]/20' : row.selected ? 'bg-white' : 'bg-gray-50'}`}>
+                      className={`border-t border-gray-50 ${row.isDuplicate ? 'opacity-50 bg-[#F0CECE]/20' : row.selected ? 'bg-white' : 'bg-gray-50'}`}>
                       <td className="px-3 py-2.5">
-                        <input type="checkbox" checked={row.selected} onChange={() => toggleRow(row.id)}
-                          disabled={row.isDuplicate} className="rounded" />
+                        <input type="checkbox" checked={row.selected} onChange={() => toggleRow(row.id)} disabled={row.isDuplicate} className="rounded" />
                       </td>
                       <td className="px-3 py-2.5 text-gray-600 whitespace-nowrap">{row.date}</td>
                       <td className="px-3 py-2.5 max-w-48">
                         <input className="w-full text-gray-800 bg-transparent outline-none focus:bg-gray-50 rounded px-1 truncate"
-                          value={row.description}
-                          onChange={e => updateRow(row.id, 'description', e.target.value)} />
+                          value={row.description} onChange={e => updateRow(row.id, 'description', e.target.value)} />
                       </td>
                       <td className="px-3 py-2.5 whitespace-nowrap">
                         <span className={row.type === 'credit' ? 'text-[#7FA68A] font-medium' : 'text-gray-800'}>
@@ -466,16 +396,14 @@ export default function Import() {
                       </td>
                       <td className="px-3 py-2.5">
                         <select className="text-xs border border-gray-200 rounded-lg px-2 py-1 bg-white outline-none focus:border-[#7FA68A] max-w-32"
-                          value={row.category_id}
-                          onChange={e => updateRow(row.id, 'category_id', e.target.value)}>
-                          <option value="">— pick —</option>
+                          value={row.category_id} onChange={e => updateRow(row.id, 'category_id', e.target.value)}>
+                          <option value="">\u2014 pick \u2014</option>
                           {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                         </select>
                       </td>
                       <td className="px-3 py-2.5">
                         <select className="text-xs border border-gray-200 rounded-lg px-2 py-1 bg-white outline-none focus:border-[#7FA68A]"
-                          value={row.spending_type}
-                          onChange={e => updateRow(row.id, 'spending_type', e.target.value as 'necessary' | 'unnecessary')}>
+                          value={row.spending_type} onChange={e => updateRow(row.id, 'spending_type', e.target.value as 'necessary' | 'unnecessary')}>
                           <option value="necessary">Necessary</option>
                           <option value="unnecessary">Unnecessary</option>
                         </select>
