@@ -556,7 +556,11 @@ export default function Import() {
     if (toInsert.length === 0) return
     setCommitting(true)
 
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) { setError('Not logged in'); setCommitting(false); return }
+
     const records = toInsert.map(r => ({
+      user_id: user.id,
       date: r.date,
       merchant: r.description,
       amount: r.amount,
