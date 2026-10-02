@@ -143,11 +143,73 @@ function parseGPay(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' 
   }
   return rows
 }
+function parsePaytm(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
+  const rows: Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] = []
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
 
+  let i = 0
+  while (i < lines.length) {
+    // Date line: "30 Sep" or "09 Oct"
+    const dateLine = lines[i]
+    const dateMatch = dateLine.match(/^(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)$/)
+    if (!dateMatch) { i++; continue }
+
+    // Time line: "12:44 PM"
+    const timeLine = lines[i + 1] ?? ''
+    if (!timeLine.match(/\d{1,2}:\d{2}\s*(AM|PM)/i)) { i++; continue }
+
+    // Description lines until "UPI Ref No"
+    let desc = ''
+    let utrNo = ''
+    let type: 'debit' | 'credit' = 'debit'
+    let amtStr = ''
+    let j = i + 2
+
+    while (j < lines.length) {
+      const l = lines[j]
+      if (l.startsWith('UPI ID:')) { j++; continue }
+      if (l.startsWith('UPI Ref No:')) {
+        utrNo = l.replace('UPI Ref No:', '').trim()
+        j++; continue
+      }
+      if (l.startsWith('Note:') || l.startsWith('Tag:') || l.startsWith('#')) { j++; continue }
+      if (l.startsWith('Axis Bank') || l.startsWith('- Rs.') || l.startsWith('+ Rs.')) {
+        if (l.startsWith('- Rs.')) { type = 'debit'; amtStr = l.replace('- Rs.', '').replace(/,/g, '').trim() }
+        if (l.startsWith('+ Rs.')) { type = 'credit'; amtStr = l.replace('+ Rs.', '').replace(/,/g, '').trim() }
+        j++
+        // Amount might be on next line if split
+        if (!amtStr && lines[j]) { amtStr = lines[j].replace(/,/g, '').trim(); j++ }
+        break
+      }
+      if (l.startsWith('Page ') || l.startsWith('For any queries') || l.startsWith('Passbook')) break
+      if (!desc) desc = l
+      else desc += ' ' + l
+      j++
+    }
+
+    if (!amtStr || !utrNo) { i = j; continue }
+    const amount = parseFloat(amtStr)
+    if (isNaN(amount) || amount <= 0) { i = j; continue }
+
+    // Build date: "30 Sep" + guess year from context
+    const currentYear = new Date().getFullYear()
+    const monthNum = new Date(`${dateMatch[2]} 1`).getMonth()
+    const day = parseInt(dateMatch[1])
+    const dateObj = new Date(currentYear, monthNum, day)
+    // If date is in future, use previous year
+    if (dateObj > new Date()) dateObj.setFullYear(currentYear - 1)
+    const dateISO = dateObj.toISOString().slice(0, 10)
+
+    const cleanDesc = desc.replace(/^Paid to\s+/i, '').replace(/^Received from\s+/i, '').trim()
+    rows.push({ id: utrNo, date: dateISO, description: cleanDesc, amount, type, utrNo, source: 'Paytm' })
+    i = j
+  }
+  return rows
+}
 function detectAndParse(text: string, _filename: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
+  if (text.includes('Paytm Statement') || text.includes('Passbook Payments History')) return parsePaytm(text)
   if (text.includes('PhonePe') || text.includes('UTR No')) return parsePhonePe(text)
   if (text.includes('Google Pay') || text.includes('UPI Transaction ID')) return parseGPay(text)
-  // fallback: try both
   const pp = parsePhonePe(text)
   if (pp.length > 0) return pp
   return parseGPay(text)
