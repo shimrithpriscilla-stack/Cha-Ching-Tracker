@@ -246,53 +246,71 @@ function CategorySelect({ rowId, categories, value, onSelect, onNewCategory }: I
   const [adding, setAdding] = useState(false)
   const [newName, setNewName] = useState('')
   const [saving, setSaving] = useState(false)
+  const [catError, setCatError] = useState('')
 
-  async function createCategory() {
-    const name = newName.trim()
+  async function createCategory(nameOverride?: string) {
+    const name = (nameOverride ?? newName).trim()
     if (!name) return
+    setCatError('')
     setSaving(true)
-    const { data, error } = await supabase
-      .from('categories')
-      .insert({ name })
-      .select('id, name')
-      .single()
+    try {
+      const { data, error } = await supabase
+        .from('categories')
+        .insert({ name })
+        .select('id, name')
+        .single()
+      if (error) { setCatError(error.message); setSaving(false); return }
+      if (!data) { setCatError('No data returned'); setSaving(false); return }
+      onNewCategory(data)
+      onSelect(rowId, data.id)
+      setAdding(false)
+      setNewName('')
+    } catch (e: any) {
+      setCatError(e.message ?? 'Unknown error')
+    }
     setSaving(false)
-    if (error || !data) return
-    onNewCategory(data)
-    onSelect(rowId, data.id)
-    setAdding(false)
-    setNewName('')
   }
 
   if (adding) {
     return (
-      <div className="flex items-center gap-1">
-        <input
-          autoFocus
-          className="text-xs border border-[#7FA68A] rounded-lg px-2 py-1 outline-none w-28"
-          placeholder="Category name"
-          value={newName}
-          onChange={e => setNewName(e.target.value)}
-          onKeyDown={e => {
-            if (e.key === 'Enter') createCategory()
-            if (e.key === 'Escape') { setAdding(false); setNewName('') }
-          }}
-        />
-        <button
-          onMouseDown={e => e.preventDefault()}
-          onClick={createCategory}
-          disabled={saving || !newName.trim()}
-          className="text-xs bg-[#7FA68A] text-white px-2 py-1 rounded-lg disabled:opacity-50"
-        >
-          {saving ? '…' : 'Add'}
-        </button>
-        <button
-          onMouseDown={e => e.preventDefault()}
-          onClick={() => { setAdding(false); setNewName('') }}
-          className="text-xs text-gray-400 hover:text-gray-600 px-1"
-        >
-          ✕
-        </button>
+      <div className="flex flex-col gap-1">
+        <div className="flex items-center gap-1">
+          <input
+            autoFocus
+            className="text-xs border border-[#7FA68A] rounded-lg px-2 py-1 outline-none w-28"
+            placeholder="e.g. Miscellaneous"
+            value={newName}
+            onChange={e => setNewName(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter') { e.preventDefault(); createCategory() }
+              if (e.key === 'Escape') { setAdding(false); setNewName(''); setCatError('') }
+            }}
+            onBlur={e => {
+              // if focus moves to a sibling button, let it handle the click
+              const related = e.relatedTarget as HTMLElement | null
+              if (related?.dataset?.cataction) return
+              // otherwise just keep the input open
+            }}
+          />
+          <button
+            data-cataction="save"
+            type="button"
+            disabled={saving}
+            className="text-xs bg-[#7FA68A] text-white px-2 py-1 rounded-lg disabled:opacity-50 flex-shrink-0"
+            onClick={() => createCategory()}
+          >
+            {saving ? '…' : 'Save'}
+          </button>
+          <button
+            data-cataction="cancel"
+            type="button"
+            className="text-xs text-gray-400 hover:text-gray-600 px-1 flex-shrink-0"
+            onClick={() => { setAdding(false); setNewName(''); setCatError('') }}
+          >
+            ✕
+          </button>
+        </div>
+        {catError && <div className="text-xs text-red-500">{catError}</div>}
       </div>
     )
   }
@@ -311,7 +329,7 @@ function CategorySelect({ rowId, categories, value, onSelect, onNewCategory }: I
     >
       <option value="">-- pick --</option>
       {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-      <option value="__add__">+ Add new…</option>
+      <option value="__add__">✚ Add new…</option>
     </select>
   )
 }
