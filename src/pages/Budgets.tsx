@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../supabase'
-import { Edit2, AlertTriangle, CheckCircle, XCircle, Plus } from 'lucide-react'
+import { Edit2, AlertTriangle, CheckCircle, XCircle, Plus, Trash2 } from 'lucide-react'
 
 interface Category {
   id: string
@@ -19,9 +19,12 @@ export default function Budgets() {
   const [loading, setLoading] = useState(true)
   const [editCat, setEditCat] = useState<Category | null>(null)
   const [budgetVal, setBudgetVal] = useState('')
+  const [colorVal, setColorVal] = useState('')
   const [showAdd, setShowAdd] = useState(false)
   const [newName, setNewName] = useState('')
   const [newBudget, setNewBudget] = useState('')
+  const [newColor, setNewColor] = useState('#C8DDD0')
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
 
   async function load() {
     const now = new Date()
@@ -40,16 +43,21 @@ export default function Budgets() {
 
   async function saveBudget() {
     if (!editCat) return
-    await supabase.from('categories').update({ monthly_budget: Number(budgetVal) }).eq('id', editCat.id)
+    await supabase.from('categories').update({ monthly_budget: Number(budgetVal), color_tag: colorVal }).eq('id', editCat.id)
     setEditCat(null)
+    load()
+  }
+
+  async function deleteCategory(id: string) {
+    await supabase.from('categories').delete().eq('id', id)
+    setDeleteConfirm(null)
     load()
   }
 
   async function addCategory() {
     if (!newName.trim()) return
-    const colors = ['#C8DDD0', '#D5CEED', '#F0CECE', '#F7DEC4', '#C4DCF0', '#C4E8D5']
-    await supabase.from('categories').insert({ name: newName.trim(), monthly_budget: Number(newBudget) || 0, color_tag: colors[categories.length % colors.length] })
-    setNewName(''); setNewBudget(''); setShowAdd(false)
+    await supabase.from('categories').insert({ name: newName.trim(), monthly_budget: Number(newBudget) || 0, color_tag: newColor })
+    setNewName(''); setNewBudget(''); setNewColor('#C8DDD0'); setShowAdd(false)
     load()
   }
 
@@ -98,7 +106,8 @@ export default function Budgets() {
                   <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ background: cat.color_tag }} />
                   <span className="font-semibold text-gray-800 text-sm flex-1">{cat.name}</span>
                   {isOver ? <XCircle size={16} className="text-red-400" /> : isWarn ? <AlertTriangle size={16} className="text-amber-400" /> : <CheckCircle size={16} className="text-[#7FA68A]" />}
-                  <button onClick={() => { setEditCat(cat); setBudgetVal(String(cat.monthly_budget)) }} className="p-1 text-gray-400 hover:text-gray-600"><Edit2 size={13} /></button>
+                  <button onClick={() => { setEditCat(cat); setBudgetVal(String(cat.monthly_budget)); setColorVal(cat.color_tag || '#C8DDD0') }} className="p-1 text-gray-400 hover:text-gray-600"><Edit2 size={13} /></button>
+                  <button onClick={() => setDeleteConfirm(cat.id)} className="p-1 text-gray-300 hover:text-red-400"><Trash2 size={13} /></button>
                 </div>
 
                 <div className="flex items-end justify-between mb-2">
@@ -131,9 +140,23 @@ export default function Budgets() {
       {editCat && (
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-xl">
-            <h2 className="text-lg font-light text-gray-800 mb-4" style={{ fontFamily: 'Georgia,serif' }}>Edit Budget — {editCat.name}</h2>
-            <input type="number" placeholder="Monthly budget (₹)" className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:border-[#7FA68A] mb-4"
-              value={budgetVal} onChange={e => setBudgetVal(e.target.value)} />
+            <h2 className="text-lg font-light text-gray-800 mb-4" style={{ fontFamily: 'Georgia,serif' }}>Edit — {editCat.name}</h2>
+            <div className="flex flex-col gap-3 mb-4">
+              <input type="number" placeholder="Monthly budget (₹)" className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:border-[#7FA68A]"
+                value={budgetVal} onChange={e => setBudgetVal(e.target.value)} />
+              <div>
+                <div className="text-xs text-gray-400 mb-2">Colour tag</div>
+                <div className="flex gap-2 flex-wrap">
+                  {['#C8DDD0','#D5CEED','#F0CECE','#F7DEC4','#C4DCF0','#C4E8D5','#F5D6B8','#E8C4D5','#B8D4E8','#D4E8B8'].map(c => (
+                    <button key={c} onClick={() => setColorVal(c)}
+                      className={`w-7 h-7 rounded-full border-2 transition-all ${colorVal === c ? 'border-gray-600 scale-110' : 'border-transparent'}`}
+                      style={{ background: c }} />
+                  ))}
+                  <input type="color" value={colorVal} onChange={e => setColorVal(e.target.value)}
+                    className="w-7 h-7 rounded-full border border-gray-200 cursor-pointer" title="Custom colour" />
+                </div>
+              </div>
+            </div>
             <div className="flex gap-2">
               <button onClick={() => setEditCat(null)} className="flex-1 border border-gray-200 rounded-xl py-2.5 text-sm text-gray-500">Cancel</button>
               <button onClick={saveBudget} className="flex-1 bg-[#7FA68A] text-white rounded-xl py-2.5 text-sm font-medium">Save</button>
@@ -152,10 +175,36 @@ export default function Budgets() {
                 value={newName} onChange={e => setNewName(e.target.value)} />
               <input type="number" placeholder="Monthly budget (₹)" className="border border-gray-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:border-[#7FA68A]"
                 value={newBudget} onChange={e => setNewBudget(e.target.value)} />
+              <div>
+                <div className="text-xs text-gray-400 mb-2">Colour tag</div>
+                <div className="flex gap-2 flex-wrap">
+                  {['#C8DDD0','#D5CEED','#F0CECE','#F7DEC4','#C4DCF0','#C4E8D5','#F5D6B8','#E8C4D5','#B8D4E8','#D4E8B8'].map(c => (
+                    <button key={c} onClick={() => setNewColor(c)}
+                      className={`w-7 h-7 rounded-full border-2 transition-all ${newColor === c ? 'border-gray-600 scale-110' : 'border-transparent'}`}
+                      style={{ background: c }} />
+                  ))}
+                  <input type="color" value={newColor} onChange={e => setNewColor(e.target.value)}
+                    className="w-7 h-7 rounded-full border border-gray-200 cursor-pointer" title="Custom colour" />
+                </div>
+              </div>
             </div>
             <div className="flex gap-2 mt-4">
               <button onClick={() => setShowAdd(false)} className="flex-1 border border-gray-200 rounded-xl py-2.5 text-sm text-gray-500">Cancel</button>
               <button onClick={addCategory} className="flex-1 bg-[#7FA68A] text-white rounded-xl py-2.5 text-sm font-medium">Add</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete confirm modal */}
+      {deleteConfirm && (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-xl">
+            <h2 className="text-lg font-light text-gray-800 mb-2" style={{ fontFamily: 'Georgia,serif' }}>Delete category?</h2>
+            <p className="text-sm text-gray-500 mb-5">This won't delete any transactions, just the category label. Transactions in this category will become uncategorised.</p>
+            <div className="flex gap-2">
+              <button onClick={() => setDeleteConfirm(null)} className="flex-1 border border-gray-200 rounded-xl py-2.5 text-sm text-gray-500">Cancel</button>
+              <button onClick={() => deleteCategory(deleteConfirm)} className="flex-1 bg-red-400 text-white rounded-xl py-2.5 text-sm font-medium">Delete</button>
             </div>
           </div>
         </div>

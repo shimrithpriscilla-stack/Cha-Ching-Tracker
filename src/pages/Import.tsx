@@ -270,8 +270,27 @@ function CategorySelect({ rowId, categories, value, onSelect, onNewCategory }: I
     setSaving(true)
     try {
       const { data: { user } } = await supabase.auth.getUser()
-    if (!user) { setCatError('Not logged in'); setSaving(false); return }
-    const { data, error } = await supabase
+      if (!user) { setCatError('Not logged in'); setSaving(false); return }
+
+      // Check if category with this name already exists (case-insensitive)
+      const { data: existing } = await supabase
+        .from('categories')
+        .select('id, name')
+        .ilike('name', name)
+        .limit(1)
+        .single()
+
+      if (existing) {
+        // Reuse the existing category instead of creating a duplicate
+        onNewCategory(existing)
+        onSelect(rowId, existing.id)
+        setAdding(false)
+        setNewName('')
+        setSaving(false)
+        return
+      }
+
+      const { data, error } = await supabase
         .from('categories')
         .insert({ name, user_id: user.id })
         .select('id, name')
