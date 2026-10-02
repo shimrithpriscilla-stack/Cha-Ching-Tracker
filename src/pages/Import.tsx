@@ -266,25 +266,44 @@ export default function Import() {
 
   let text = ''
 
-  if (file.name.endsWith('.pdf')) {
-    // Extract text from PDF using PDF.js
-    const arrayBuffer = await file.arrayBuffer()
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
-    const pages: string[] = []
-    for (let p = 1; p <= pdf.numPages; p++) {
-      const page = await pdf.getPage(p)
-      const content = await page.getTextContent()
-      const pageText = content.items.map((item: any) => ('str' in item ? item.str : '')).join(' ')
-      pages.push(pageText)
+  try {
+    if (file.name.toLowerCase().endsWith('.pdf')) {
+      const arrayBuffer = await file.arrayBuffer()
+      const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) })
+      const pdf = await loadingTask.promise
+      const pages: string[] = []
+      for (let p = 1; p <= pdf.numPages; p++) {
+        const page = await pdf.getPage(p)
+        const content = await page.getTextContent()
+        const pageText = content.items
+          .map((item: any) => ('str' in item ? item.str : ''))
+          .join(' ')
+        pages.push(pageText)
+      }
+      text = pages.join('\n')
+    } else {
+      text = await file.text()
     }
-    text = pages.join('\n')
-  } else {
-    text = await file.text()
+  } catch (err) {
+    alert('Could not read this file: ' + (err as Error).message)
+    setLoading(false)
+    return
+  }
+
+  if (!text || text.trim().length < 50) {
+    alert('No text could be extracted from this file. Try the unlocked PDF version.')
+    setLoading(false)
+    return
   }
 
   const parsed = detectAndParse(text, file.name)
 
-  // Check duplicates
+  if (parsed.length === 0) {
+    alert(`Parsed 0 transactions. File detected as: ${text.includes('PhonePe') ? 'PhonePe' : text.includes('Google Pay') ? 'GPay' : text.includes('Paytm') ? 'Paytm' : 'Unknown'}. Check if the PDF is password-protected or try a different file.`)
+    setLoading(false)
+    return
+  }
+
   const utrs = parsed.map(r => r.utrNo).filter(Boolean)
   let existingUtrs = new Set<string>()
   if (utrs.length > 0) {
@@ -314,59 +333,6 @@ export default function Import() {
   setCategories(cats)
   setLoading(false)
 }
-
-  const onDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    setDragging(false)
-    const file = e.dataTransfer.files[0]
-    if (file) processFile(file)
-  }, [])
-
-  function toggleRow(id: string) {
-    setRows(prev => prev.map(r => r.id === id ? { ...r, selected: !r.selected } : r))
-  }
-
-  function toggleAll() {
-    const allSelected = rows.filter(r => !r.isDuplicate).every(r => r.selected)
-    setRows(prev => prev.map(r => r.isDuplicate ? r : { ...r, selected: !allSelected }))
-  }
-
-  function updateRow(id: string, field: keyof ParsedRow, value: string) {
-    setRows(prev => prev.map(r => r.id === id ? { ...r, [field]: value } : r))
-  }
-
-  function deleteRow(id: string) {
-    setRows(prev => prev.filter(r => r.id !== id))
-  }
-
-  async function commit() {
-    setCommitting(true)
-    const toInsert = rows.filter(r => r.selected)
-    let count = 0
-
-    for (const row of toInsert) {
-      const modeRes = await supabase.from('payment_modes').select('id').eq('name', 'UPI').single()
-      const platformMap: Record<string, string> = {
-        PhonePe: 'PhonePe', GPay: 'GPay', Paytm: 'Paytm'
-      }
-      const platRes = await supabase.from('platforms').select('id').eq('name', platformMap[row.source] ?? row.source).single()
-
-      await supabase.from('transactions').insert({
-        date: row.date,
-        amount: row.amount,
-        mode_id: modeRes.data?.id ?? null,
-        platform_id: platRes.data?.id ?? null,
-        category_id: row.category_id || null,
-        spending_type: row.spending_type,
-        notes: `UTR:${row.utrNo} | ${row.description}`.slice(0, 200),
-      })
-      count++
-    }
-
-    setCommitted(count)
-    setRows(prev => prev.filter(r => !r.selected))
-    setCommitting(false)
-  }
 
   const selectedCount = rows.filter(r => r.selected).length
   const dupCount = rows.filter(r => r.isDuplicate).length
@@ -408,10 +374,12 @@ export default function Import() {
       )}
 
       {loading && (
-        <div className="text-center py-16 text-gray-400">
-          <div className="text-sm">Parsing your statement…</div>
-        </div>
-      )}
+  <div className="text-center py-20 flex flex-col items-center gap-4">
+    <div className="w-12 h-12 border-4 border-[#C8DDD0] border-t-[#7FA68A] rounded-full animate-spin" />
+    <div className="text-gray-500 text-sm font-medium">Reading your statement…</div>
+    <div className="text-gray-400 text-xs">This may take a few seconds for large PDFs</div>
+  </div>
+)}
 
       {committed > 0 && rows.length === 0 && (
         <div className="bg-[#C8DDD0] rounded-2xl p-6 flex items-center gap-4 mt-4">
