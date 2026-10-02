@@ -2,7 +2,7 @@ import * as pdfjsLib from 'pdfjs-dist'
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs`
 
 import { useState } from 'react'
-import { Upload, AlertTriangle, CheckCircle, Trash2 } from 'lucide-react'
+import { Upload, AlertTriangle, CheckCircle, Trash2, RefreshCw, Plus } from 'lucide-react'
 import { supabase } from '../supabase'
 
 interface ParsedRow {
@@ -232,6 +232,88 @@ function fmt(n: number) {
   return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(n)
 }
 
+// ── Inline category creator ───────────────────────────────────────────────────
+
+interface InlineCatProps {
+  rowId: string
+  categories: Category[]
+  value: string
+  onSelect: (rowId: string, catId: string) => void
+  onNewCategory: (cat: Category) => void
+}
+
+function CategorySelect({ rowId, categories, value, onSelect, onNewCategory }: InlineCatProps) {
+  const [adding, setAdding] = useState(false)
+  const [newName, setNewName] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  async function createCategory() {
+    const name = newName.trim()
+    if (!name) return
+    setSaving(true)
+    const { data, error } = await supabase
+      .from('categories')
+      .insert({ name })
+      .select('id, name')
+      .single()
+    setSaving(false)
+    if (error || !data) return
+    onNewCategory(data)
+    onSelect(rowId, data.id)
+    setAdding(false)
+    setNewName('')
+  }
+
+  if (adding) {
+    return (
+      <div className="flex items-center gap-1">
+        <input
+          autoFocus
+          className="text-xs border border-[#7FA68A] rounded-lg px-2 py-1 outline-none w-28"
+          placeholder="Category name"
+          value={newName}
+          onChange={e => setNewName(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter') createCategory()
+            if (e.key === 'Escape') { setAdding(false); setNewName('') }
+          }}
+        />
+        <button
+          onClick={createCategory}
+          disabled={saving || !newName.trim()}
+          className="text-xs bg-[#7FA68A] text-white px-2 py-1 rounded-lg disabled:opacity-50"
+        >
+          {saving ? '…' : 'Add'}
+        </button>
+        <button
+          onClick={() => { setAdding(false); setNewName('') }}
+          className="text-xs text-gray-400 hover:text-gray-600 px-1"
+        >
+          ✕
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <select
+      className="text-xs border border-gray-200 rounded-lg px-2 py-1 bg-white outline-none focus:border-[#7FA68A] max-w-36"
+      value={value}
+      onChange={e => {
+        if (e.target.value === '__add__') {
+          setAdding(true)
+        } else {
+          onSelect(rowId, e.target.value)
+        }
+      }}
+    >
+      <option value="">-- pick --</option>
+      {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+      <option value="__add__">+ Add new…</option>
+    </select>
+  )
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function Import() {
@@ -243,6 +325,14 @@ export default function Import() {
   const [committing, setCommitting] = useState(false)
   const [committed, setCommitted] = useState(0)
   const [error, setError] = useState('')
+  const [refreshingCats, setRefreshingCats] = useState(false)
+
+  async function refreshCategories() {
+    setRefreshingCats(true)
+    const { data } = await supabase.from('categories').select('id, name').order('name')
+    if (data) setCategories(data)
+    setRefreshingCats(false)
+  }
 
   async function processFile(file: File) {
     setLoading(true)
@@ -270,7 +360,6 @@ export default function Import() {
           pages.push(pageText)
         }
         const rawText = pages.join(' ')
-        // Normalize: re-insert newlines before known tokens that PDF.js collapses
         text = rawText
           .replace(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}/g, '\n$&')
           .replace(/(\d{2}:\d{2}\s*(?:AM|PM))/gi, '\n$1')
@@ -376,6 +465,10 @@ export default function Import() {
     setRows(rows.filter(r => r.id !== id))
   }
 
+  function handleNewCategory(cat: Category) {
+    setCategories(prev => [...prev, cat].sort((a, b) => a.name.localeCompare(b.name)))
+  }
+
   async function commit() {
     const toInsert = rows.filter(r => r.selected && !r.isDuplicate)
     if (toInsert.length === 0) return
@@ -422,7 +515,7 @@ export default function Import() {
         </div>
       )}
 
-      {/* Drop zone -- only show when no rows and not loading */}
+      {/* Drop zone */}
       {rows.length === 0 && !loading && committed === 0 && (
         <label htmlFor="file-upload"
           onDrop={onDrop}
@@ -491,6 +584,15 @@ export default function Import() {
               <div className="bg-[#F7DEC4] rounded-xl px-4 py-2 text-sm">
                 <span className="text-gray-600">Total spend: </span><strong>{fmt(totalSelected)}</strong>
               </div>
+              <button
+                onClick={refreshCategories}
+                disabled={refreshingCats}
+                title="Refresh categories from database"
+                className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-[#7FA68A] border border-gray-200 rounded-xl px-3 py-2 transition-all disabled:opacity-50"
+              >
+                <RefreshCw size={12} className={refreshingCats ? 'animate-spin' : ''} />
+                Refresh categories
+              </button>
             </div>
             <div className="ml-auto flex gap-2">
               <button onClick={() => { setRows([]); setError('') }}
@@ -545,12 +647,13 @@ export default function Import() {
                         </span>
                       </td>
                       <td className="px-3 py-2.5">
-                        <select className="text-xs border border-gray-200 rounded-lg px-2 py-1 bg-white outline-none focus:border-[#7FA68A] max-w-32"
+                        <CategorySelect
+                          rowId={row.id}
+                          categories={categories}
                           value={row.category_id}
-                          onChange={e => updateRow(row.id, 'category_id', e.target.value)}>
-                          <option value="">-- pick --</option>
-                          {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                        </select>
+                          onSelect={(id, catId) => updateRow(id, 'category_id', catId)}
+                          onNewCategory={handleNewCategory}
+                        />
                       </td>
                       <td className="px-3 py-2.5">
                         <select className="text-xs border border-gray-200 rounded-lg px-2 py-1 bg-white outline-none focus:border-[#7FA68A]"
