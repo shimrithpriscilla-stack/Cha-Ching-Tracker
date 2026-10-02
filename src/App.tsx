@@ -8,7 +8,7 @@ import Budgets from './pages/Budgets'
 import Analysis from './pages/Analysis'
 import IncomeVsSpend from './pages/IncomeVsSpend'
 
-const PAGES: Record<string, JSX.Element> = {
+const PAGES: Record<string, React.ReactElement> = {
   income: <Income />,
   transactions: <Transactions />,
   budgets: <Budgets />,

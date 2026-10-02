@@ -80,7 +80,7 @@ export default function IncomeVsSpend() {
                 <XAxis dataKey="month" tick={{ fontSize: 12, fill: '#9CA3AF' }} axisLine={false} tickLine={false} />
                 <YAxis tick={{ fontSize: 11, fill: '#9CA3AF' }} axisLine={false} tickLine={false} width={52}
                   tickFormatter={v => v >= 1000 ? `₹${(v/1000).toFixed(0)}K` : `₹${v}`} />
-                <Tooltip formatter={(v: number, name: string) => [fmt(v), name === 'income' ? 'Income' : 'Expenses']}
+                <Tooltip formatter={(v: unknown, name: unknown) => [fmt(Number(v)), name === 'income' ? 'Income' : 'Expenses']}
                   contentStyle={{ borderRadius: 12, border: '1px solid #F3F4F6' }} />
                 <Legend iconType="circle" iconSize={8} formatter={v => <span style={{ fontSize: 11 }}>{v === 'income' ? 'Income' : 'Expenses'}</span>} />
                 <Bar dataKey="income" fill="#7FA68A" radius={[6, 6, 0, 0]} name="income" />

@@ -123,7 +123,7 @@ export default function Analysis() {
                     <Pie data={catData} dataKey="value" nameKey="name" cx="50%" cy="50%" innerRadius={50} outerRadius={80} paddingAngle={3}>
                       {catData.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
                     </Pie>
-                    <Tooltip formatter={(v: number) => fmt(v)} />
+                    <Tooltip formatter={(v: unknown) => fmt(Number(v))} />
                     <Legend iconType="circle" iconSize={8} formatter={v => <span style={{ fontSize: 11 }}>{v}</span>} />
                   </PieChart>
                 </ResponsiveContainer>
@@ -141,7 +141,7 @@ export default function Analysis() {
                         <Cell fill="#7FA68A" />
                         <Cell fill="#E8A5A5" />
                       </Pie>
-                      <Tooltip formatter={(v: number) => fmt(v)} />
+                      <Tooltip formatter={(v: unknown) => fmt(Number(v))} />
                       <Legend iconType="circle" iconSize={8} formatter={v => <span style={{ fontSize: 11 }}>{v}</span>} />
                     </PieChart>
                   </ResponsiveContainer>
@@ -171,7 +171,7 @@ export default function Analysis() {
                   <XAxis dataKey="date" tick={{ fontSize: 11, fill: '#9CA3AF' }} axisLine={false} tickLine={false} />
                   <YAxis tick={{ fontSize: 11, fill: '#9CA3AF' }} axisLine={false} tickLine={false} width={52}
                     tickFormatter={v => v >= 1000 ? `₹${(v/1000).toFixed(0)}K` : `₹${v}`} />
-                  <Tooltip formatter={(v: number) => fmt(v)} />
+                  <Tooltip formatter={(v: unknown) => fmt(Number(v))} />
                   <Line type="monotone" dataKey="amount" stroke="#7FA68A" strokeWidth={2} dot={{ r: 4, fill: '#7FA68A', strokeWidth: 0 }} activeDot={{ r: 6 }} />
                 </LineChart>
               </ResponsiveContainer>
