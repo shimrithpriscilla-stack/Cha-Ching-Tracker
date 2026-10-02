@@ -236,6 +236,13 @@ function autoCategory(desc: string): { category: string; type: 'necessary' | 'un
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+function fmtDate(iso: string) {
+  if (!iso) return ""
+  const [y, m, d] = iso.split("-")
+  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+  return `${d}-${months[parseInt(m, 10) - 1]}-${y}`
+}
+
 function fmt(n: number) {
   return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(n)
 }
@@ -691,7 +698,7 @@ export default function Import() {
                         <input type="checkbox" checked={row.selected} onChange={() => toggleRow(row.id)}
                           disabled={row.isDuplicate} className="rounded" />
                       </td>
-                      <td className="px-3 py-2.5 text-gray-600 whitespace-nowrap">{row.date}</td>
+                      <td className="px-3 py-2.5 text-gray-600 whitespace-nowrap">{fmtDate(row.date)}</td>
                       <td className="px-3 py-2.5 max-w-48">
                         <input className="w-full text-gray-800 bg-transparent outline-none focus:bg-gray-50 rounded px-1 truncate"
                           value={row.description}
