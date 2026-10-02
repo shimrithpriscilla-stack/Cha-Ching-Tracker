@@ -144,7 +144,7 @@ function parseGPay(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' 
   return rows
 }
 
-function detectAndParse(text: string, filename: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
+function detectAndParse(text: string, _filename: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
   if (text.includes('PhonePe') || text.includes('UTR No')) return parsePhonePe(text)
   if (text.includes('Google Pay') || text.includes('UPI Transaction ID')) return parseGPay(text)
   // fallback: try both
