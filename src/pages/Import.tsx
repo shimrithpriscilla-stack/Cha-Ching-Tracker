@@ -1,3 +1,5 @@
+import * as pdfjsLib from 'pdfjs-dist'
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs`
 import { useState, useRef, useCallback } from 'react'
 import { Upload, FileText, AlertTriangle, CheckCircle, Trash2, ChevronDown } from 'lucide-react'
 import { supabase } from '../supabase'
@@ -257,44 +259,60 @@ export default function Import() {
   }
 
   async function processFile(file: File) {
-    setLoading(true)
-    setCommitted(0)
-    await loadCategories()
+  setLoading(true)
+  setCommitted(0)
+  await loadCategories()
 
-    const text = await file.text()
-    const parsed = detectAndParse(text, file.name)
+  let text = ''
 
-    // Check duplicates against existing UTR nos in DB
-    const utrs = parsed.map(r => r.utrNo).filter(Boolean)
-    let existingUtrs = new Set<string>()
-    if (utrs.length > 0) {
-      // Store UTR in notes field with prefix for dedup check
-      const { data } = await supabase
-        .from('transactions')
-        .select('notes')
-        .like('notes', 'UTR:%')
-      existingUtrs = new Set((data ?? []).map(r => r.notes.replace('UTR:', '')))
+  if (file.name.endsWith('.pdf')) {
+    // Extract text from PDF using PDF.js
+    const arrayBuffer = await file.arrayBuffer()
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
+    const pages: string[] = []
+    for (let p = 1; p <= pdf.numPages; p++) {
+      const page = await pdf.getPage(p)
+      const content = await page.getTextContent()
+      const pageText = content.items.map((item: any) => ('str' in item ? item.str : '')).join(' ')
+      pages.push(pageText)
     }
-
-    const { data: catData } = await supabase.from('categories').select('id, name').order('name')
-    const cats = catData ?? []
-
-    const withMeta: ParsedRow[] = parsed.map(r => {
-      const { category, type } = autoCategory(r.description)
-      const cat = cats.find(c => c.name === category)
-      return {
-        ...r,
-        isDuplicate: existingUtrs.has(r.utrNo),
-        category_id: cat?.id ?? '',
-        spending_type: type,
-        selected: !existingUtrs.has(r.utrNo),
-      }
-    })
-
-    setRows(withMeta)
-    setCategories(cats)
-    setLoading(false)
+    text = pages.join('\n')
+  } else {
+    text = await file.text()
   }
+
+  const parsed = detectAndParse(text, file.name)
+
+  // Check duplicates
+  const utrs = parsed.map(r => r.utrNo).filter(Boolean)
+  let existingUtrs = new Set<string>()
+  if (utrs.length > 0) {
+    const { data } = await supabase
+      .from('transactions')
+      .select('notes')
+      .like('notes', 'UTR:%')
+    existingUtrs = new Set((data ?? []).map(r => r.notes.replace('UTR:', '')))
+  }
+
+  const { data: catData } = await supabase.from('categories').select('id, name').order('name')
+  const cats = catData ?? []
+
+  const withMeta: ParsedRow[] = parsed.map(r => {
+    const { category, type } = autoCategory(r.description)
+    const cat = cats.find(c => c.name === category)
+    return {
+      ...r,
+      isDuplicate: existingUtrs.has(r.utrNo),
+      category_id: cat?.id ?? '',
+      spending_type: type,
+      selected: !existingUtrs.has(r.utrNo),
+    }
+  })
+
+  setRows(withMeta)
+  setCategories(cats)
+  setLoading(false)
+}
 
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
