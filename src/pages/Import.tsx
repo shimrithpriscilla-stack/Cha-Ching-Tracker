@@ -279,6 +279,7 @@ function CategorySelect({ rowId, categories, value, onSelect, onNewCategory }: I
           }}
         />
         <button
+          onMouseDown={e => e.preventDefault()}
           onClick={createCategory}
           disabled={saving || !newName.trim()}
           className="text-xs bg-[#7FA68A] text-white px-2 py-1 rounded-lg disabled:opacity-50"
@@ -286,6 +287,7 @@ function CategorySelect({ rowId, categories, value, onSelect, onNewCategory }: I
           {saving ? '…' : 'Add'}
         </button>
         <button
+          onMouseDown={e => e.preventDefault()}
           onClick={() => { setAdding(false); setNewName('') }}
           className="text-xs text-gray-400 hover:text-gray-600 px-1"
         >
