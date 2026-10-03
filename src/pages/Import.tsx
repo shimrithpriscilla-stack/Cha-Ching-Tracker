@@ -2,7 +2,7 @@ import * as pdfjsLib from 'pdfjs-dist'
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs`
 
 import { useState } from 'react'
-import { Upload, AlertTriangle, CheckCircle, Trash2, RefreshCw, Plus } from 'lucide-react'
+import { Upload, AlertTriangle, CheckCircle, Trash2, RefreshCw, ArrowUpDown } from 'lucide-react'
 import { supabase } from '../supabase'
 
 interface ParsedRow {
@@ -14,6 +14,7 @@ interface ParsedRow {
   utrNo: string
   note: string
   source: string
+  account: string          // e.g. "SBI", "Niyo SBM", "Axis MyZone", "Axis Neo"
   isDuplicate: boolean
   category_id: string
   spending_type: 'necessary' | 'unnecessary'
@@ -21,10 +22,49 @@ interface ParsedRow {
 }
 
 interface Category { id: string; name: string }
+interface PaymentMode { id: string; name: string }
+
+type SortField = 'date' | 'amount'
+type SortDir = 'asc' | 'desc'
+
+// ── Account detection helpers ─────────────────────────────────────────────────
+
+/**
+ * PhonePe / GPay: look for masked account numbers in the full PDF text.
+ * PhonePe shows "Debited from XXXXXX1234" where last 4 digits indicate card.
+ * GPay shows "SBI" or "Niyo" in the bank label.
+ * Fallback: treat the whole text for known keywords.
+ */
+function detectPhonePayAccount(fullText: string): string {
+  // Niyo SBM signals
+  if (/niyo|SBM|sbm bank/i.test(fullText)) return 'Niyo SBM'
+  // SBI signals
+  if (/SBI|State Bank/i.test(fullText)) return 'SBI'
+  return ''
+}
+
+function detectGPayAccount(fullText: string): string {
+  if (/niyo|SBM|sbm bank/i.test(fullText)) return 'Niyo SBM'
+  if (/SBI|State Bank/i.test(fullText)) return 'SBI'
+  return ''
+}
+
+/**
+ * Paytm: detect Axis MyZone vs Axis Neo from card number hints or card label.
+ * Paytm statements often say "AXIS BANK - ...MyZone" or show last 4 digits
+ * that differ between the two cards. We look for card-name keywords.
+ */
+function detectPaytmAccount(fullText: string): string {
+  if (/myzone/i.test(fullText)) return 'Axis MyZone'
+  if (/neo/i.test(fullText)) return 'Axis Neo'
+  // Fallback: Axis card present
+  if (/axis/i.test(fullText)) return 'Axis MyZone'
+  return ''
+}
 
 // ── Parsers ──────────────────────────────────────────────────────────────────
 
-function parsePhonePe(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
+function parsePhonePe(text: string, account: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
   const rows: Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] = []
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
 
@@ -87,13 +127,13 @@ function parsePhonePe(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_i
       .replace(/^Payment Received\s*/i, 'Received')
       .trim()
 
-    rows.push({ id: utrNo || `pp-${Date.now()}-${rows.length}`, date: dateISO, description: cleanDesc, amount, type, utrNo, note, source: 'PhonePe' })
+    rows.push({ id: utrNo || `pp-${Date.now()}-${rows.length}`, date: dateISO, description: cleanDesc, amount, type, utrNo, note, source: 'PhonePe', account })
     i = k
   }
   return rows
 }
 
-function parseGPay(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
+function parseGPay(text: string, account: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
   const rows: Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] = []
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
 
@@ -138,13 +178,13 @@ function parseGPay(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' 
     const dateISO = isNaN(dateObj.getTime()) ? '' : dateObj.toISOString().slice(0, 10)
     if (!dateISO) { i = k + 1; continue }
 
-    rows.push({ id: utrNo || `gp-${Date.now()}-${rows.length}`, date: dateISO, description: cleanDesc, amount, type, utrNo, note: '', source: 'GPay' })
+    rows.push({ id: utrNo || `gp-${Date.now()}-${rows.length}`, date: dateISO, description: cleanDesc, amount, type, utrNo, note: '', source: 'GPay', account })
     i = k + 1
   }
   return rows
 }
 
-function parsePaytm(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
+function parsePaytm(text: string, account: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
   const rows: Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] = []
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
 
@@ -198,19 +238,25 @@ function parsePaytm(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_id'
     const dateISO = dateObj.toISOString().slice(0, 10)
 
     const cleanDesc = desc.replace(/^Paid to\s+/i, '').replace(/^Received from\s+/i, '').trim()
-    rows.push({ id: utrNo, date: dateISO, description: cleanDesc, amount, type, utrNo, note, source: 'Paytm' })
+    rows.push({ id: utrNo, date: dateISO, description: cleanDesc, amount, type, utrNo, note, source: 'Paytm', account })
     i = j
   }
   return rows
 }
 
 function detectAndParse(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
-  if (text.includes('Paytm Statement') || text.includes('Passbook Payments History')) return parsePaytm(text)
-  if (text.includes('PhonePe') || text.includes('UTR No')) return parsePhonePe(text)
-  if (text.includes('Google Pay') || text.includes('UPI Transaction ID')) return parseGPay(text)
-  const pp = parsePhonePe(text)
+  if (text.includes('Paytm Statement') || text.includes('Passbook Payments History')) {
+    return parsePaytm(text, detectPaytmAccount(text))
+  }
+  if (text.includes('PhonePe') || text.includes('UTR No')) {
+    return parsePhonePe(text, detectPhonePayAccount(text))
+  }
+  if (text.includes('Google Pay') || text.includes('UPI Transaction ID')) {
+    return parseGPay(text, detectGPayAccount(text))
+  }
+  const pp = parsePhonePe(text, detectPhonePayAccount(text))
   if (pp.length > 0) return pp
-  return parseGPay(text)
+  return parseGPay(text, detectGPayAccount(text))
 }
 
 // ── Auto-categorisation rules ─────────────────────────────────────────────────
@@ -272,7 +318,6 @@ function CategorySelect({ rowId, categories, value, onSelect, onNewCategory }: I
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) { setCatError('Not logged in'); setSaving(false); return }
 
-      // Check if category with this name already exists (case-insensitive)
       const { data: existing } = await supabase
         .from('categories')
         .select('id, name')
@@ -281,7 +326,6 @@ function CategorySelect({ rowId, categories, value, onSelect, onNewCategory }: I
         .single()
 
       if (existing) {
-        // Reuse the existing category instead of creating a duplicate
         onNewCategory(existing)
         onSelect(rowId, existing.id)
         setAdding(false)
@@ -322,10 +366,8 @@ function CategorySelect({ rowId, categories, value, onSelect, onNewCategory }: I
               if (e.key === 'Escape') { setAdding(false); setNewName(''); setCatError('') }
             }}
             onBlur={e => {
-              // if focus moves to a sibling button, let it handle the click
               const related = e.relatedTarget as HTMLElement | null
               if (related?.dataset?.cataction) return
-              // otherwise just keep the input open
             }}
           />
           <button
@@ -375,6 +417,7 @@ function CategorySelect({ rowId, categories, value, onSelect, onNewCategory }: I
 export default function Import() {
   const [rows, setRows] = useState<ParsedRow[]>([])
   const [categories, setCategories] = useState<Category[]>([])
+  const [paymentModes, setPaymentModes] = useState<PaymentMode[]>([])
   const [dragging, setDragging] = useState(false)
   const [loading, setLoading] = useState(false)
   const [loadingMsg, setLoadingMsg] = useState('Reading your statement…')
@@ -382,6 +425,31 @@ export default function Import() {
   const [committed, setCommitted] = useState(0)
   const [error, setError] = useState('')
   const [refreshingCats, setRefreshingCats] = useState(false)
+
+  // Sort state
+  const [sortField, setSortField] = useState<SortField>('date')
+  const [sortDir, setSortDir] = useState<SortDir>('desc')
+
+  // Filter state (multi-select via Set)
+  const [filterSources, setFilterSources] = useState<Set<string>>(new Set())
+  const [filterAccounts, setFilterAccounts] = useState<Set<string>>(new Set())
+  const [filterTypes, setFilterTypes] = useState<Set<string>>(new Set())
+
+  function toggleSort(field: SortField) {
+    if (sortField === field) {
+      setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    } else {
+      setSortField(field)
+      setSortDir(field === 'amount' ? 'desc' : 'asc')
+    }
+  }
+
+  function toggleFilter(set: Set<string>, setter: (s: Set<string>) => void, val: string) {
+    const next = new Set(set)
+    if (next.has(val)) next.delete(val)
+    else next.add(val)
+    setter(next)
+  }
 
   async function refreshCategories() {
     setRefreshingCats(true)
@@ -395,6 +463,10 @@ export default function Import() {
     setError('')
     setCommitted(0)
     setLoadingMsg('Reading your statement…')
+    // Reset filters on new file
+    setFilterSources(new Set())
+    setFilterAccounts(new Set())
+    setFilterTypes(new Set())
 
     let text = ''
 
@@ -461,8 +533,6 @@ export default function Import() {
     const utrs = parsed.map(r => r.utrNo).filter(Boolean)
     let existingUtrs = new Set<string>()
     if (utrs.length > 0) {
-      // Fetch all stored UTRs from the notes field (stored as "UTR:XXXXXXXXX | source")
-      // We pull all notes containing "UTR:" and extract the numbers client-side
       const { data } = await supabase
         .from('transactions')
         .select('notes')
@@ -476,10 +546,10 @@ export default function Import() {
       )
     }
 
-    setLoadingMsg('Loading categories & note history…')
-    const [catResult, noteHistoryResult] = await Promise.all([
+    setLoadingMsg('Loading categories, payment modes & note history…')
+    const [catResult, modeResult, noteHistoryResult] = await Promise.all([
       supabase.from('categories').select('id, name').order('name'),
-      // Fetch merchant→most recent note mapping for auto-suggest
+      supabase.from('payment_modes').select('id, name').order('name'),
       supabase
         .from('transactions')
         .select('merchant, notes, created_at')
@@ -489,14 +559,13 @@ export default function Import() {
         .limit(500),
     ])
     const cats = catResult.data ?? []
+    setPaymentModes(modeResult.data ?? [])
 
-    // Build merchant → last user note map (strip UTR/source metadata parts)
     const merchantNoteMap = new Map<string, string>()
     for (const row of (noteHistoryResult.data ?? [])) {
       const merchant = (row.merchant ?? '').trim().toLowerCase()
       if (!merchant) continue
-      if (merchantNoteMap.has(merchant)) continue // already have most recent
-      // Extract the user-written note part (before the first " | UTR:" or " | PhonePe" etc.)
+      if (merchantNoteMap.has(merchant)) continue
       const noteParts = (row.notes ?? '').split(' | ')
       const userNote = noteParts.find(p => !p.startsWith('UTR:') && p !== 'PhonePe' && p !== 'GPay' && p !== 'Paytm' && p.trim() !== '')
       if (userNote) merchantNoteMap.set(merchant, userNote.trim())
@@ -505,7 +574,6 @@ export default function Import() {
     const withMeta: ParsedRow[] = parsed.map(r => {
       const { category, type } = autoCategory(r.description)
       const cat = cats.find(c => c.name === category)
-      // Auto-suggest note from history if not already parsed from PDF
       const suggestedNote = r.note || merchantNoteMap.get(r.description.trim().toLowerCase()) || ''
       return {
         ...r,
@@ -552,37 +620,105 @@ export default function Import() {
   }
 
   async function commit() {
-    const toInsert = rows.filter(r => r.selected && !r.isDuplicate)
+    const toInsert = visibleRows.filter(r => r.selected && !r.isDuplicate)
     if (toInsert.length === 0) return
     setCommitting(true)
 
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) { setError('Not logged in'); setCommitting(false); return }
+    try {
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) { setError('Not logged in'); setCommitting(false); return }
 
-    const records = toInsert.map(r => ({
-      user_id: user.id,
-      date: r.date,
-      merchant: r.description,
-      amount: r.amount,
-      spending_type: r.spending_type,
-      category_id: r.category_id || null,
-      notes: [r.note, r.utrNo ? `UTR:${r.utrNo}` : '', r.source].filter(Boolean).join(' | '),
-    }))
+      // Find the payment mode ID for each row's account, if it matches
+      const records = toInsert.map(r => {
+        const modeMatch = paymentModes.find(m => m.name.toLowerCase() === r.account.toLowerCase())
+        return {
+          user_id: user.id,
+          date: r.date,
+          merchant: r.description,
+          amount: r.amount,
+          spending_type: r.spending_type,
+          category_id: r.category_id || null,
+          mode_id: modeMatch?.id ?? null,
+          notes: [r.note, r.utrNo ? `UTR:${r.utrNo}` : '', r.source].filter(Boolean).join(' | '),
+        }
+      })
 
-    const { error: insertError } = await supabase.from('transactions').insert(records)
-    setCommitting(false)
-    if (insertError) {
-      setError('Import failed: ' + insertError.message)
-      return
+      const { error: insertError } = await supabase.from('transactions').insert(records)
+      setCommitting(false)
+      if (insertError) {
+        setError('Import failed: ' + insertError.message)
+        return
+      }
+      setCommitted(toInsert.length)
+      setRows([])
+    } catch (e: any) {
+      setError('Import failed: ' + (e.message ?? 'Unknown error'))
+      setCommitting(false)
     }
-    setCommitted(toInsert.length)
-    setRows([])
   }
 
-  const selectedCount = rows.filter(r => r.selected).length
+  // ── Derived: filtered + sorted rows ──────────────────────────────────────────
+
+  const allSources = [...new Set(rows.map(r => r.source))].sort()
+  const allAccounts = [...new Set(rows.map(r => r.account).filter(Boolean))].sort()
+  const allTypes = ['debit', 'credit']
+
+  const visibleRows = rows
+    .filter(r => {
+      if (filterSources.size > 0 && !filterSources.has(r.source)) return false
+      if (filterAccounts.size > 0 && !filterAccounts.has(r.account)) return false
+      if (filterTypes.size > 0 && !filterTypes.has(r.type)) return false
+      return true
+    })
+    .sort((a, b) => {
+      if (sortField === 'date') {
+        const diff = a.date.localeCompare(b.date)
+        return sortDir === 'asc' ? diff : -diff
+      }
+      if (sortField === 'amount') {
+        const diff = a.amount - b.amount
+        return sortDir === 'asc' ? diff : -diff
+      }
+      return 0
+    })
+
+  const selectedCount = visibleRows.filter(r => r.selected).length
   const dupCount = rows.filter(r => r.isDuplicate).length
-  const debits = rows.filter(r => r.selected && r.type === 'debit')
+  const debits = visibleRows.filter(r => r.selected && r.type === 'debit')
   const totalSelected = debits.reduce((s, r) => s + r.amount, 0)
+
+  function SortBtn({ field, label }: { field: SortField; label: string }) {
+    const active = sortField === field
+    return (
+      <button
+        onClick={() => toggleSort(field)}
+        className={`flex items-center gap-1 text-left hover:text-[#7FA68A] transition-all ${active ? 'text-[#7FA68A] font-semibold' : ''}`}
+      >
+        {label}
+        <ArrowUpDown size={10} className={active ? 'opacity-100' : 'opacity-30'} />
+        {active && <span className="text-[10px] opacity-60">{sortDir === 'asc' ? '↑' : '↓'}</span>}
+      </button>
+    )
+  }
+
+  function FilterChips({ label, options, active, onToggle }: { label: string; options: string[]; active: Set<string>; onToggle: (v: string) => void }) {
+    if (options.length < 2) return null
+    return (
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <span className="text-[10px] text-gray-400 uppercase tracking-wide">{label}:</span>
+        {options.map(opt => (
+          <button key={opt} onClick={() => onToggle(opt)}
+            className={`text-xs px-2.5 py-0.5 rounded-full border transition-all ${
+              active.has(opt)
+                ? 'bg-[#7FA68A] text-white border-[#7FA68A]'
+                : 'bg-white text-gray-500 border-gray-200 hover:border-[#7FA68A]'
+            }`}>
+            {opt}
+          </button>
+        ))}
+      </div>
+    )
+  }
 
   return (
     <div className="p-6 max-w-6xl">
@@ -653,32 +789,32 @@ export default function Import() {
       {/* Staging table */}
       {rows.length > 0 && (
         <>
-          <div className="flex items-center gap-4 mb-4 flex-wrap">
-            <div className="flex gap-3 flex-wrap">
-              <div className="bg-[#C8DDD0] rounded-xl px-4 py-2 text-sm">
-                <span className="text-gray-600">Total rows: </span><strong>{rows.length}</strong>
-              </div>
-              <div className="bg-[#D5CEED] rounded-xl px-4 py-2 text-sm">
-                <span className="text-gray-600">Selected: </span><strong>{selectedCount}</strong>
-              </div>
-              {dupCount > 0 && (
-                <div className="bg-[#F0CECE] rounded-xl px-4 py-2 text-sm">
-                  <span className="text-gray-600">Duplicates: </span><strong>{dupCount}</strong>
-                </div>
-              )}
-              <div className="bg-[#F7DEC4] rounded-xl px-4 py-2 text-sm">
-                <span className="text-gray-600">Total spend: </span><strong>{fmt(totalSelected)}</strong>
-              </div>
-              <button
-                onClick={refreshCategories}
-                disabled={refreshingCats}
-                title="Refresh categories from database"
-                className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-[#7FA68A] border border-gray-200 rounded-xl px-3 py-2 transition-all disabled:opacity-50"
-              >
-                <RefreshCw size={12} className={refreshingCats ? 'animate-spin' : ''} />
-                Refresh categories
-              </button>
+          {/* Summary chips */}
+          <div className="flex items-center gap-3 mb-3 flex-wrap">
+            <div className="bg-[#C8DDD0] rounded-xl px-4 py-2 text-sm">
+              <span className="text-gray-600">Rows: </span><strong>{rows.length}</strong>
+              {rows.length !== visibleRows.length && <span className="text-gray-400 ml-1">(showing {visibleRows.length})</span>}
             </div>
+            <div className="bg-[#D5CEED] rounded-xl px-4 py-2 text-sm">
+              <span className="text-gray-600">Selected: </span><strong>{selectedCount}</strong>
+            </div>
+            {dupCount > 0 && (
+              <div className="bg-[#F0CECE] rounded-xl px-4 py-2 text-sm">
+                <span className="text-gray-600">Duplicates: </span><strong>{dupCount}</strong>
+              </div>
+            )}
+            <div className="bg-[#F7DEC4] rounded-xl px-4 py-2 text-sm">
+              <span className="text-gray-600">Total spend: </span><strong>{fmt(totalSelected)}</strong>
+            </div>
+            <button
+              onClick={refreshCategories}
+              disabled={refreshingCats}
+              title="Refresh categories from database"
+              className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-[#7FA68A] border border-gray-200 rounded-xl px-3 py-2 transition-all disabled:opacity-50"
+            >
+              <RefreshCw size={12} className={refreshingCats ? 'animate-spin' : ''} />
+              Refresh categories
+            </button>
             <div className="ml-auto flex gap-2">
               <button onClick={() => { setRows([]); setError('') }}
                 className="text-sm text-gray-400 hover:text-gray-600 border border-gray-200 rounded-xl px-4 py-2">
@@ -691,6 +827,38 @@ export default function Import() {
             </div>
           </div>
 
+          {/* Filter chips */}
+          <div className="flex gap-4 mb-3 flex-wrap items-center bg-[#F5F2EC] rounded-2xl px-4 py-2.5">
+            <FilterChips
+              label="App"
+              options={allSources}
+              active={filterSources}
+              onToggle={v => toggleFilter(filterSources, setFilterSources, v)}
+            />
+            {allAccounts.length > 0 && (
+              <FilterChips
+                label="Account"
+                options={allAccounts}
+                active={filterAccounts}
+                onToggle={v => toggleFilter(filterAccounts, setFilterAccounts, v)}
+              />
+            )}
+            <FilterChips
+              label="Type"
+              options={allTypes}
+              active={filterTypes}
+              onToggle={v => toggleFilter(filterTypes, setFilterTypes, v)}
+            />
+            {(filterSources.size > 0 || filterAccounts.size > 0 || filterTypes.size > 0) && (
+              <button
+                onClick={() => { setFilterSources(new Set()); setFilterAccounts(new Set()); setFilterTypes(new Set()) }}
+                className="text-xs text-gray-400 hover:text-gray-600 underline ml-auto"
+              >
+                Clear filters
+              </button>
+            )}
+          </div>
+
           <div className="bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -698,22 +866,22 @@ export default function Import() {
                   <tr className="bg-[#F5F2EC] text-xs text-gray-500 uppercase tracking-wide">
                     <th className="px-3 py-3 text-left w-8">
                       <input type="checkbox" onChange={toggleAll}
-                        checked={rows.filter(r => !r.isDuplicate).length > 0 && rows.filter(r => !r.isDuplicate).every(r => r.selected)}
+                        checked={visibleRows.filter(r => !r.isDuplicate).length > 0 && visibleRows.filter(r => !r.isDuplicate).every(r => r.selected)}
                         className="rounded" />
                     </th>
-                    <th className="px-3 py-3 text-left">Date</th>
+                    <th className="px-3 py-3 text-left"><SortBtn field="date" label="Date" /></th>
                     <th className="px-3 py-3 text-left">Description</th>
                     <th className="px-3 py-3 text-left">Notes</th>
-                    <th className="px-3 py-3 text-left">Amount</th>
+                    <th className="px-3 py-3 text-left"><SortBtn field="amount" label="Amount" /></th>
                     <th className="px-3 py-3 text-left">Category</th>
                     <th className="px-3 py-3 text-left">Type</th>
-                    <th className="px-3 py-3 text-left">Source</th>
+                    <th className="px-3 py-3 text-left">Account</th>
                     <th className="px-3 py-3 text-left">Status</th>
                     <th className="px-3 py-3 text-left w-8"></th>
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map(row => (
+                  {visibleRows.map(row => (
                     <tr key={row.id}
                       className={`border-t border-gray-50 transition-all
                         ${row.isDuplicate ? 'opacity-50 bg-[#F0CECE]/20' : row.selected ? 'bg-white' : 'bg-gray-50'}`}>
@@ -760,7 +928,12 @@ export default function Import() {
                         </select>
                       </td>
                       <td className="px-3 py-2.5">
-                        <span className="text-xs bg-[#F5F2EC] text-gray-500 px-2 py-0.5 rounded-full">{row.source}</span>
+                        <div className="flex flex-col gap-0.5">
+                          <span className="text-xs bg-[#F5F2EC] text-gray-500 px-2 py-0.5 rounded-full w-fit">{row.source}</span>
+                          {row.account && (
+                            <span className="text-[10px] text-gray-400 font-medium px-2">{row.account}</span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-3 py-2.5">
                         {row.isDuplicate
@@ -774,6 +947,13 @@ export default function Import() {
                       </td>
                     </tr>
                   ))}
+                  {visibleRows.length === 0 && (
+                    <tr>
+                      <td colSpan={10} className="px-3 py-8 text-center text-sm text-gray-400">
+                        No rows match the current filters.
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
