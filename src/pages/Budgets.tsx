@@ -18,6 +18,7 @@ export default function Budgets() {
   const [categories, setCategories] = useState<Category[]>([])
   const [loading, setLoading] = useState(true)
   const [editCat, setEditCat] = useState<Category | null>(null)
+  const [nameVal, setNameVal] = useState('')
   const [budgetVal, setBudgetVal] = useState('')
   const [colorVal, setColorVal] = useState('')
   const [showAdd, setShowAdd] = useState(false)
@@ -43,7 +44,7 @@ export default function Budgets() {
 
   async function saveBudget() {
     if (!editCat) return
-    await supabase.from('categories').update({ monthly_budget: Number(budgetVal), color_tag: colorVal }).eq('id', editCat.id)
+    await supabase.from('categories').update({ name: nameVal.trim() || editCat.name, monthly_budget: Number(budgetVal), color_tag: colorVal }).eq('id', editCat.id)
     setEditCat(null)
     load()
   }
@@ -106,7 +107,7 @@ export default function Budgets() {
                   <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ background: cat.color_tag }} />
                   <span className="font-semibold text-gray-800 text-sm flex-1">{cat.name}</span>
                   {isOver ? <XCircle size={16} className="text-red-400" /> : isWarn ? <AlertTriangle size={16} className="text-amber-400" /> : <CheckCircle size={16} className="text-[#7FA68A]" />}
-                  <button onClick={() => { setEditCat(cat); setBudgetVal(String(cat.monthly_budget)); setColorVal(cat.color_tag || '#C8DDD0') }} className="p-1 text-gray-400 hover:text-gray-600"><Edit2 size={13} /></button>
+                  <button onClick={() => { setEditCat(cat); setNameVal(cat.name); setBudgetVal(String(cat.monthly_budget)); setColorVal(cat.color_tag || '#C8DDD0') }} className="p-1 text-gray-400 hover:text-gray-600"><Edit2 size={13} /></button>
                   <button onClick={() => setDeleteConfirm(cat.id)} className="p-1 text-gray-300 hover:text-red-400"><Trash2 size={13} /></button>
                 </div>
 
@@ -140,8 +141,10 @@ export default function Budgets() {
       {editCat && (
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-xl">
-            <h2 className="text-lg font-light text-gray-800 mb-4" style={{ fontFamily: 'Georgia,serif' }}>Edit — {editCat.name}</h2>
+            <h2 className="text-lg font-light text-gray-800 mb-4" style={{ fontFamily: 'Georgia,serif' }}>Edit Category</h2>
             <div className="flex flex-col gap-3 mb-4">
+              <input placeholder="Category name" className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:border-[#7FA68A]"
+                value={nameVal} onChange={e => setNameVal(e.target.value)} />
               <input type="number" placeholder="Monthly budget (₹)" className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:border-[#7FA68A]"
                 value={budgetVal} onChange={e => setBudgetVal(e.target.value)} />
               <div>
