@@ -550,17 +550,20 @@ export default function Import() {
 
   // Drag-resizable column widths
   const [colWidths, setColWidths] = useState({ description: 200, notes: 140 })
+  const colWidthsRef = useRef(colWidths)
+  colWidthsRef.current = colWidths
   const resizingRef = useRef<{ col: 'description' | 'notes'; startX: number; startW: number } | null>(null)
 
   const onResizeStart = useCallback((col: 'description' | 'notes', e: React.MouseEvent) => {
     e.preventDefault()
-    const startW = col === 'description' ? colWidths.description : colWidths.notes
+    const startW = colWidthsRef.current[col]
     resizingRef.current = { col, startX: e.clientX, startW }
     function onMove(ev: MouseEvent) {
       if (!resizingRef.current) return
       const delta = ev.clientX - resizingRef.current.startX
       const newW = Math.max(80, resizingRef.current.startW + delta)
-      setColWidths(prev => ({ ...prev, [resizingRef.current!.col]: newW }))
+      const c = resizingRef.current.col
+      setColWidths(prev => ({ ...prev, [c]: newW }))
     }
     function onUp() {
       resizingRef.current = null
@@ -569,7 +572,7 @@ export default function Import() {
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
-  }, [colWidths])
+  }, [])
 
   // Filter state (multi-select via Set)
   const [filterSources, setFilterSources] = useState<Set<string>>(new Set())
