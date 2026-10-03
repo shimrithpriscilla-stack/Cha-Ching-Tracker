@@ -199,7 +199,7 @@ export default function Transactions() {
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2">
                 <span className="font-semibold text-gray-800 text-sm">{t.categories?.name ?? '—'}</span>
-                <span className="text-xs text-gray-400 ml-auto">{new Date(t.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
+                <span className="text-xs text-gray-400 ml-auto">{(([y,m,d]) => `${d}-${['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][parseInt(m,10)-1]}-${y}`)(t.date.slice(0,10).split('-'))}</span>
               </div>
               {t.notes && <p className="text-xs text-gray-400 truncate">{t.notes}</p>}
               <div className="flex gap-1.5 mt-1 flex-wrap">

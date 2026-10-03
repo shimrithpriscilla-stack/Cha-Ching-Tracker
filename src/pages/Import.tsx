@@ -43,6 +43,27 @@ function detectPhonePayAccount(fullText: string): string {
   return ''
 }
 
+/** Map PhonePe CSV "Credit/debit instrument" field to a friendly account name.
+ *  XXXXXX1802 → "SBI XX1802"   (SBI debit card)
+ *  XXXXXX9331 → "Niyo XX9331"  (Niyo SBM debit card)
+ *  XXXX8002   → "Axis MyZone"
+ *  XXXX0823   → "Axis Neo"
+ *  "Account"  → "" (direct UPI credit)
+ */
+function instrumentToAccount(instrument: string): string {
+  const s = instrument.trim()
+  const m = s.match(/X+(\d{4})$/)
+  if (m) {
+    const last4 = m[1]
+    if (last4 === '1802') return 'SBI XX1802'
+    if (last4 === '9331') return 'Niyo XX9331'
+    if (last4 === '8002') return 'Axis MyZone'
+    if (last4 === '0823') return 'Axis Neo'
+    return 'XX' + last4
+  }
+  return ''
+}
+
 function detectGPayAccount(fullText: string): string {
   if (/niyo|SBM|sbm bank/i.test(fullText)) return 'Niyo SBM'
   if (/SBI|State Bank/i.test(fullText)) return 'SBI'
@@ -253,8 +274,6 @@ function parsePhonePeCSV(text: string): Omit<ParsedRow, 'isDuplicate' | 'categor
   const headerIdx = lines.findIndex(l => l.startsWith('Date,') && l.includes('Transaction Details'))
   if (headerIdx === -1) return rows
 
-  const account = detectPhonePayAccount(lines.slice(0, headerIdx).join(' '))
-
   for (let i = headerIdx + 1; i < lines.length; i++) {
     const line = lines[i]
     if (!line) continue
@@ -262,11 +281,12 @@ function parsePhonePeCSV(text: string): Omit<ParsedRow, 'isDuplicate' | 'categor
     const parts = line.split(',')
     if (parts.length < 8) continue
 
-    const dateStr = parts[0].trim()         // 2025-10-05
-    const details = parts[2].trim()          // "Paid to New Tasty Bekery"
-    const utrNo = parts[4].trim()            // UTR number
-    const txnType = parts[5].trim()          // "Credit" or "Debit"
-    const amtStr = parts[parts.length - 1].trim()  // Amount (last field)
+    const dateStr = parts[0].trim()           // 2025-10-05
+    const details = parts[2].trim()            // "Paid to New Tasty Bekery"
+    const utrNo = parts[4].trim()              // UTR number
+    const txnType = parts[5].trim()            // "Credit" or "Debit"
+    const instrument = parts[6].trim()         // "XXXXXX1802" or "Account"
+    const amtStr = parts[parts.length - 1].trim()  // Amount — last field handles commas in merchant names
 
     if (!dateStr.match(/^\d{4}-\d{2}-\d{2}$/)) continue
     if (!txnType.match(/^(Credit|Debit)$/i)) continue
@@ -275,8 +295,9 @@ function parsePhonePeCSV(text: string): Omit<ParsedRow, 'isDuplicate' | 'categor
     if (isNaN(amount) || amount <= 0) continue
 
     const type = txnType.toLowerCase() === 'credit' ? 'credit' : 'debit'
+    const account = instrumentToAccount(instrument)
 
-    const cleanDesc = details
+        const cleanDesc = details
       .replace(/^Paid to\s+/i, '')
       .replace(/^Received from\s+/i, '')
       .trim()
@@ -931,7 +952,7 @@ export default function Import() {
                     <th className="px-3 py-3 text-left"><SortBtn field="amount" label="Amount" /></th>
                     <th className="px-3 py-3 text-left">Category</th>
                     <th className="px-3 py-3 text-left">Type</th>
-                    <th className="px-3 py-3 text-left">Account</th>
+                    <th className="px-3 py-3 text-left whitespace-nowrap">Payment Mode / Card</th>
                     <th className="px-3 py-3 text-left">Status</th>
                     <th className="px-3 py-3 text-left w-8"></th>
                   </tr>
@@ -946,9 +967,10 @@ export default function Import() {
                           disabled={row.isDuplicate} className="rounded" />
                       </td>
                       <td className="px-3 py-2.5 text-gray-600 whitespace-nowrap">{fmtDate(row.date)}</td>
-                      <td className="px-3 py-2.5 max-w-48">
+                      <td className="px-3 py-2.5 w-64 min-w-[16rem]">
                         <input className="w-full text-gray-800 bg-transparent outline-none focus:bg-gray-50 rounded px-1 truncate"
                           value={row.description}
+                          title={row.description}
                           onChange={e => updateRow(row.id, 'description', e.target.value)} />
                       </td>
                       <td className="px-3 py-2.5 max-w-40">
