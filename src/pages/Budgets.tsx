@@ -57,7 +57,9 @@ export default function Budgets() {
 
   async function addCategory() {
     if (!newName.trim()) return
-    await supabase.from('categories').insert({ name: newName.trim(), monthly_budget: Number(newBudget) || 0, color_tag: newColor })
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
+    await supabase.from('categories').insert({ name: newName.trim(), monthly_budget: Number(newBudget) || 0, color_tag: newColor, user_id: user.id })
     setNewName(''); setNewBudget(''); setNewColor('#C8DDD0'); setShowAdd(false)
     load()
   }

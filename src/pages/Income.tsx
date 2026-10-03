@@ -36,10 +36,12 @@ export default function Income() {
 
   async function save() {
     if (!form.source_name || !form.amount) return
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
     if (editId) {
       await supabase.from('income_streams').update({ ...form, amount: Number(form.amount) }).eq('id', editId)
     } else {
-      await supabase.from('income_streams').insert({ ...form, amount: Number(form.amount) })
+      await supabase.from('income_streams').insert({ ...form, amount: Number(form.amount), user_id: user.id })
     }
     setShowForm(false)
     setEditId(null)

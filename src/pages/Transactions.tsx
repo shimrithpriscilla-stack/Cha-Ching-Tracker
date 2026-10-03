@@ -77,9 +77,11 @@ export default function Transactions() {
 
   async function save() {
     if (!form.amount || !form.date) return
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
     const payload = { ...form, amount: Number(form.amount), category_id: form.category_id || null, mode_id: form.mode_id || null, platform_id: form.platform_id || null }
     if (editId) await supabase.from('transactions').update(payload).eq('id', editId)
-    else await supabase.from('transactions').insert(payload)
+    else await supabase.from('transactions').insert({ ...payload, user_id: user.id })
     setShowForm(false); setEditId(null)
     setForm({ date: new Date().toISOString().slice(0, 10), amount: '', category_id: '', mode_id: '', platform_id: '', spending_type: 'necessary', notes: '' })
     load()
