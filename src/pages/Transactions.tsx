@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../supabase'
-import { Plus, Search, Edit2, Trash2 } from 'lucide-react'
+import { Plus, Search, Edit2, Trash2, ArrowUpDown } from 'lucide-react'
 
 interface Transaction {
   id: string
@@ -16,6 +16,8 @@ interface Transaction {
 interface DropdownItem { id: string; name: string }
 
 type Period = '7d' | '30d' | 'month' | '3m' | 'all'
+type SortField = 'date' | 'amount'
+type SortDir = 'asc' | 'desc'
 
 function fmt(n: number) {
   return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(n)
@@ -47,6 +49,8 @@ export default function Transactions() {
   const [search, setSearch] = useState('')
   const [filterCat, setFilterCat] = useState('all')
   const [filterType, setFilterType] = useState('all')
+  const [sortField, setSortField] = useState<SortField>('date')
+  const [sortDir, setSortDir] = useState<SortDir>('desc')
   const [showForm, setShowForm] = useState(false)
   const [editId, setEditId] = useState<string | null>(null)
   const [form, setForm] = useState({
@@ -92,15 +96,29 @@ export default function Transactions() {
     setShowForm(true)
   }
 
-  const filtered = txns.filter(t => {
-    if (filterCat !== 'all' && t.categories?.name !== filterCat) return false
-    if (filterType !== 'all' && t.spending_type !== filterType) return false
-    if (search) {
-      const q = search.toLowerCase()
-      if (!t.notes?.toLowerCase().includes(q) && !t.categories?.name?.toLowerCase().includes(q)) return false
-    }
-    return true
-  })
+  function toggleSort(field: SortField) {
+    if (sortField === field) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    else { setSortField(field); setSortDir(field === 'amount' ? 'desc' : 'asc') }
+  }
+
+  const filtered = txns
+    .filter(t => {
+      if (filterCat !== 'all' && t.categories?.name !== filterCat) return false
+      if (filterType !== 'all' && t.spending_type !== filterType) return false
+      if (search) {
+        const q = search.toLowerCase()
+        if (!t.notes?.toLowerCase().includes(q) && !t.categories?.name?.toLowerCase().includes(q)) return false
+      }
+      return true
+    })
+    .sort((a, b) => {
+      if (sortField === 'date') {
+        const diff = a.date.localeCompare(b.date)
+        return sortDir === 'asc' ? diff : -diff
+      }
+      const diff = a.amount - b.amount
+      return sortDir === 'asc' ? diff : -diff
+    })
 
   const total = filtered.reduce((s, t) => s + t.amount, 0)
 
@@ -134,7 +152,7 @@ export default function Transactions() {
       </div>
 
       {/* Filters */}
-      <div className="flex gap-3 mb-4 flex-wrap">
+      <div className="flex gap-3 mb-3 flex-wrap">
         <div className="flex-1 min-w-48 relative">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
           <input className="w-full border border-gray-200 rounded-xl pl-9 pr-4 py-2 text-sm outline-none focus:border-[#7FA68A]"
@@ -151,6 +169,19 @@ export default function Transactions() {
           <option value="necessary">Necessary</option>
           <option value="unnecessary">Unnecessary</option>
         </select>
+      </div>
+
+      {/* Sort controls */}
+      <div className="flex items-center gap-4 mb-4">
+        <span className="text-[10px] text-gray-400 uppercase tracking-wide">Sort:</span>
+        {(['date', 'amount'] as SortField[]).map(field => (
+          <button key={field} onClick={() => toggleSort(field)}
+            className={`flex items-center gap-1 text-xs transition-all ${sortField === field ? 'text-[#7FA68A] font-semibold' : 'text-gray-400 hover:text-[#7FA68A]'}`}>
+            <ArrowUpDown size={10} className={sortField === field ? 'opacity-100' : 'opacity-40'} />
+            {field.charAt(0).toUpperCase() + field.slice(1)}
+            {sortField === field && <span className="opacity-60">{sortDir === 'asc' ? '↑' : '↓'}</span>}
+          </button>
+        ))}
       </div>
 
       <div className="flex justify-between items-center mb-3 text-sm text-gray-400">
