@@ -34,7 +34,12 @@ export default function Budgets() {
     const { data: txns } = await supabase.from('transactions').select('category_id, amount').gte('date', monthStart)
 
     const spendMap: Record<string, number> = {}
-    txns?.forEach(t => { if (t.category_id) spendMap[t.category_id] = (spendMap[t.category_id] ?? 0) + t.amount })
+    txns?.forEach(t => {
+      if (t.category_id) {
+        const amt = (t.spending_type === 'credit' || t.amount < 0) ? -Math.abs(t.amount) : t.amount
+        spendMap[t.category_id] = (spendMap[t.category_id] ?? 0) + amt
+      }
+    })
 
     setCategories((cats ?? []).map(c => ({ ...c, spent: spendMap[c.id] ?? 0 })))
     setLoading(false)

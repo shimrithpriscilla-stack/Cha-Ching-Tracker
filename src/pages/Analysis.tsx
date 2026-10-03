@@ -44,14 +44,24 @@ export default function Analysis() {
 
   const FREQ: Record<string, number> = { monthly: 1, weekly: 4.33, quarterly: 0.33, annual: 0.083, 'one-time': 0 }
   const totalIncome = income.reduce((s, i) => s + i.amount * (FREQ[i.frequency] ?? 1), 0)
-  const totalExpenses = txns.reduce((s, t) => s + t.amount, 0)
-  const netBalance = totalIncome - totalExpenses
-  const unnecessary = txns.filter(t => t.spending_type === 'unnecessary').reduce((s, t) => s + t.amount, 0)
+  // Credits are negative or marked 'credit' — treat as reimbursements, separate from spend
+  const spendTxns = txns.filter(t => t.spending_type !== 'credit' && t.amount > 0)
+  const creditTxns = txns.filter(t => t.spending_type === 'credit' || t.amount < 0)
+  const totalExpenses = spendTxns.reduce((s, t) => s + t.amount, 0)
+  const totalCredits = creditTxns.reduce((s, t) => s + Math.abs(t.amount), 0)
+  const netExpenses = totalExpenses - totalCredits
+  const netBalance = totalIncome - netExpenses
+  const unnecessary = spendTxns.filter(t => t.spending_type === 'unnecessary').reduce((s, t) => s + t.amount, 0)
   const discRatio = totalExpenses > 0 ? (unnecessary / totalExpenses * 100).toFixed(1) : '0.0'
 
+  // Category map uses net (spend - credits per category)
   const catMap: Record<string, number> = {}
-  txns.forEach(t => { const k = t.categories?.name ?? 'Other'; catMap[k] = (catMap[k] ?? 0) + t.amount })
-  const catData = Object.entries(catMap).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value)
+  txns.forEach(t => {
+    const k = t.categories?.name ?? 'Other'
+    const amt = (t.spending_type === 'credit' || t.amount < 0) ? -Math.abs(t.amount) : t.amount
+    catMap[k] = (catMap[k] ?? 0) + amt
+  })
+  const catData = Object.entries(catMap).map(([name, value]) => ({ name, value: Math.max(0, value) })).filter(d => d.value > 0).sort((a, b) => b.value - a.value)
 
   const necessary = totalExpenses - unnecessary
   const necData = [{ name: 'Necessary', value: necessary }, { name: 'Discretionary', value: unnecessary }]
@@ -100,9 +110,9 @@ export default function Analysis() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
         {[
           { label: 'Total Inflow', value: fmt(totalIncome), bg: 'bg-[#C8DDD0]' },
-          { label: 'Total Expenses', value: fmt(totalExpenses), bg: 'bg-[#F0CECE]' },
-          { label: 'Net Balance', value: fmt(netBalance), bg: netBalance >= 0 ? 'bg-[#C4E8D5]' : 'bg-[#F0CECE]' },
-          { label: 'Discretionary %', value: `${discRatio}%`, bg: 'bg-[#D5CEED]' },
+          { label: 'Gross Spend', value: fmt(totalExpenses), bg: 'bg-[#F0CECE]' },
+          { label: 'Reimbursed', value: fmt(totalCredits), bg: 'bg-[#C4E8D5]' },
+          { label: 'Net Spend', value: fmt(netExpenses), bg: netExpenses <= totalIncome ? 'bg-[#C4DCF0]' : 'bg-[#F0CECE]' },
         ].map(card => (
           <div key={card.label} className={`${card.bg} rounded-2xl p-4`}>
             <div className="text-xs font-semibold uppercase tracking-wide text-gray-600 opacity-70">{card.label}</div>

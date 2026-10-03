@@ -34,7 +34,8 @@ export default function IncomeVsSpend() {
   txns.forEach(t => {
     const d = new Date(t.date)
     const key = `${d.getFullYear()}-${d.getMonth()}`
-    spendMap[key] = (spendMap[key] ?? 0) + t.amount
+    const amt = (t.spending_type === 'credit' || t.amount < 0) ? -Math.abs(t.amount) : t.amount
+    spendMap[key] = (spendMap[key] ?? 0) + amt
   })
 
   const chartData = Array.from({ length: 6 }, (_, i) => {

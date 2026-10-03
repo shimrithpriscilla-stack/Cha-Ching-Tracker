@@ -170,6 +170,7 @@ export default function Transactions() {
           <option value="all">All Types</option>
           <option value="necessary">Necessary</option>
           <option value="unnecessary">Unnecessary</option>
+          <option value="credit">Credit / Reimbursement</option>
         </select>
       </div>
 
@@ -207,13 +208,18 @@ export default function Transactions() {
               <div className="flex gap-1.5 mt-1 flex-wrap">
                 {t.payment_modes?.name && <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">{t.payment_modes.name}</span>}
                 {t.platforms?.name && <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">{t.platforms.name}</span>}
-                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${t.spending_type === 'necessary' ? 'bg-[#C8DDD0] text-[#7FA68A]' : 'bg-[#F0CECE] text-red-400'}`}>
-                  {t.spending_type === 'necessary' ? 'Necessary' : 'Discretionary'}
+                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                  t.spending_type === 'necessary' ? 'bg-[#C8DDD0] text-[#7FA68A]'
+                  : t.spending_type === 'credit' ? 'bg-[#C4E8D5] text-emerald-600'
+                  : 'bg-[#F0CECE] text-red-400'}`}>
+                  {t.spending_type === 'necessary' ? 'Necessary' : t.spending_type === 'credit' ? 'Credit ↩' : 'Discretionary'}
                 </span>
               </div>
             </div>
             <div className="flex items-center gap-2 flex-shrink-0">
-              <span className="font-light text-gray-800 text-base" style={{ fontFamily: 'Georgia,serif' }}>{fmt(t.amount)}</span>
+              <span className={`font-light text-base ${t.spending_type === 'credit' || t.amount < 0 ? 'text-emerald-600' : 'text-gray-800'}`} style={{ fontFamily: 'Georgia,serif' }}>
+                {t.spending_type === 'credit' || t.amount < 0 ? '+' : ''}{fmt(Math.abs(t.amount))}
+              </span>
               <button onClick={() => openEdit(t)} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-50 rounded-lg"><Edit2 size={13} /></button>
               <button onClick={() => remove(t.id)} className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-red-50 rounded-lg"><Trash2 size={13} /></button>
             </div>
@@ -230,7 +236,7 @@ export default function Transactions() {
               <div className="grid grid-cols-2 gap-3">
                 <input type="date" className="border border-gray-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:border-[#7FA68A]"
                   value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value }))} />
-                <input type="number" placeholder="Amount (₹)" className="border border-gray-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:border-[#7FA68A]"
+                <input type="number" placeholder="Amount (₹, negative = credit)" className="border border-gray-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:border-[#7FA68A]"
                   value={form.amount} onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} />
               </div>
               <div className="grid grid-cols-2 gap-3">
@@ -255,6 +261,7 @@ export default function Transactions() {
                   value={form.spending_type} onChange={e => setForm(f => ({ ...f, spending_type: e.target.value }))}>
                   <option value="necessary">Necessary</option>
                   <option value="unnecessary">Unnecessary</option>
+                  <option value="credit">Credit / Reimbursement</option>
                 </select>
               </div>
               <input placeholder="Notes" className="border border-gray-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:border-[#7FA68A]"
