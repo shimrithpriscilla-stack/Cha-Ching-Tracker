@@ -244,9 +244,65 @@ function parsePaytm(text: string, account: string): Omit<ParsedRow, 'isDuplicate
   return rows
 }
 
+
+function parsePhonePeCSV(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
+  const rows: Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] = []
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+
+  // Find the header row — "Date,Time,Transaction Details,..."
+  const headerIdx = lines.findIndex(l => l.startsWith('Date,') && l.includes('Transaction Details'))
+  if (headerIdx === -1) return rows
+
+  const account = detectPhonePayAccount(lines.slice(0, headerIdx).join(' '))
+
+  for (let i = headerIdx + 1; i < lines.length; i++) {
+    const line = lines[i]
+    if (!line) continue
+    // CSV fields: Date,Time,Transaction Details,Transaction ID,UTR,Transaction Type,Credit/debit instrument,Amount
+    const parts = line.split(',')
+    if (parts.length < 8) continue
+
+    const dateStr = parts[0].trim()         // 2025-10-05
+    const details = parts[2].trim()          // "Paid to New Tasty Bekery"
+    const utrNo = parts[4].trim()            // UTR number
+    const txnType = parts[5].trim()          // "Credit" or "Debit"
+    const amtStr = parts[parts.length - 1].trim()  // Amount (last field)
+
+    if (!dateStr.match(/^\d{4}-\d{2}-\d{2}$/)) continue
+    if (!txnType.match(/^(Credit|Debit)$/i)) continue
+
+    const amount = parseFloat(amtStr.replace(/,/g, ''))
+    if (isNaN(amount) || amount <= 0) continue
+
+    const type = txnType.toLowerCase() === 'credit' ? 'credit' : 'debit'
+
+    const cleanDesc = details
+      .replace(/^Paid to\s+/i, '')
+      .replace(/^Received from\s+/i, '')
+      .trim()
+
+    rows.push({
+      id: utrNo || `ppcsv-${Date.now()}-${rows.length}`,
+      date: dateStr,
+      description: cleanDesc,
+      amount,
+      type,
+      utrNo,
+      note: '',
+      source: 'PhonePe',
+      account,
+    })
+  }
+  return rows
+}
+
 function detectAndParse(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
   if (text.includes('Paytm Statement') || text.includes('Passbook Payments History')) {
     return parsePaytm(text, detectPaytmAccount(text))
+  }
+  // PhonePe CSV — has a header row starting with "Date,Time,Transaction Details"
+  if (text.includes('Transaction Details') && text.includes('Transaction Type')) {
+    return parsePhonePeCSV(text)
   }
   if (text.includes('PhonePe') || text.includes('UTR No')) {
     return parsePhonePe(text, detectPhonePayAccount(text))
