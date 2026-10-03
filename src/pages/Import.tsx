@@ -1,7 +1,7 @@
 import * as pdfjsLib from 'pdfjs-dist'
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs`
 
-import { useState } from 'react'
+import { useState, useRef, useCallback } from 'react'
 import { Upload, AlertTriangle, CheckCircle, Trash2, RefreshCw, ArrowUpDown } from 'lucide-react'
 import { supabase } from '../supabase'
 
@@ -36,10 +36,22 @@ type SortDir = 'asc' | 'desc'
  * Fallback: treat the whole text for known keywords.
  */
 function detectPhonePayAccount(fullText: string): string {
-  // Niyo SBM signals
-  if (/niyo|SBM|sbm bank/i.test(fullText)) return 'Niyo SBM'
-  // SBI signals
-  if (/SBI|State Bank/i.test(fullText)) return 'SBI'
+  // For PhonePe PDF: look for "Debited from" lines which state the actual account
+  const lines = fullText.split(/\n/)
+  for (const line of lines) {
+    const t = line.trim()
+    if (/debited from|credited to/i.test(t)) {
+      if (/niyo|sbm/i.test(t)) return 'Niyo XX9331'
+      if (/state bank|\bsbi\b/i.test(t)) return 'SBI XX1802'
+      if (/axis.*myzone|myzone/i.test(t)) return 'Axis MyZone'
+      if (/axis.*neo|\bneo\b/i.test(t)) return 'Axis Neo'
+      if (/axis/i.test(t)) return 'Axis MyZone'
+    }
+  }
+  // Fallback: check header section only (first 1000 chars)
+  const headerSection = fullText.slice(0, 1000)
+  if (/niyo|sbm bank/i.test(headerSection)) return 'Niyo XX9331'
+  if (/state bank|\bsbi\b/i.test(headerSection)) return 'SBI XX1802'
   return ''
 }
 
@@ -65,8 +77,35 @@ function instrumentToAccount(instrument: string): string {
 }
 
 function detectGPayAccount(fullText: string): string {
-  if (/niyo|SBM|sbm bank/i.test(fullText)) return 'Niyo SBM'
-  if (/SBI|State Bank/i.test(fullText)) return 'SBI'
+  // Look only near "bank account" / "linked account" lines, not payee names.
+  const lines = fullText.split(/\n/)
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i]
+    if (/linked|your bank|bank account|debit.*account|from.*account|savings.*account/i.test(l)) {
+      const ctx = lines.slice(Math.max(0, i - 1), i + 3).join(' ')
+      if (/niyo|sbm bank/i.test(ctx)) return 'Niyo XX9331'
+      if (/state bank|\bsbi\b/i.test(ctx)) return 'SBI XX1802'
+      if (/axis.*myzone|myzone/i.test(ctx)) return 'Axis MyZone'
+      if (/axis.*neo|\bneo\b/i.test(ctx)) return 'Axis Neo'
+      if (/\baxis\b/i.test(ctx)) return 'Axis MyZone'
+    }
+  }
+  // Check for bank label section header
+  const headerMatch = fullText.match(/(?:bank name|issuing bank|account bank)[^\n]{0,80}/i)
+  if (headerMatch) {
+    const s = headerMatch[0]
+    if (/niyo|sbm/i.test(s)) return 'Niyo XX9331'
+    if (/state bank|sbi/i.test(s)) return 'SBI XX1802'
+    if (/axis/i.test(s)) return 'Axis MyZone'
+  }
+  // Short standalone lines that are bank names (not payee descriptions)
+  for (const line of lines) {
+    const t = line.trim()
+    if (t.length < 40 && t.length > 2) {
+      if (/^niyo|^sbm bank/i.test(t)) return 'Niyo XX9331'
+      if (/^state bank of india|^sbi savings/i.test(t)) return 'SBI XX1802'
+    }
+  }
   return ''
 }
 
@@ -138,9 +177,11 @@ function parsePhonePe(text: string, account: string): Omit<ParsedRow, 'isDuplica
     const amount = parseFloat(amtStr.replace(/,/g, ''))
     if (isNaN(amount) || amount <= 0) { i = k; continue }
 
-    const dateObj = new Date(dateLine)
-    const dateISO = isNaN(dateObj.getTime()) ? '' : dateObj.toISOString().slice(0, 10)
-    if (!dateISO) { i = k; continue }
+    // Parse date timezone-safely to avoid UTC midnight shifting day in IST
+    const MONTHS_PP: Record<string, string> = { Jan:'01',Feb:'02',Mar:'03',Apr:'04',May:'05',Jun:'06',Jul:'07',Aug:'08',Sep:'09',Oct:'10',Nov:'11',Dec:'12' }
+    const dateParts = dateLine.match(/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2}),\s+(\d{4})$/)
+    if (!dateParts) { i = k; continue }
+    const dateISO = `${dateParts[3]}-${MONTHS_PP[dateParts[1]]}-${String(parseInt(dateParts[2])).padStart(2,'0')}`
 
     const cleanDesc = desc
       .replace(/^Paid to\s+/i, '')
@@ -194,10 +235,9 @@ function parseGPay(text: string, account: string): Omit<ParsedRow, 'isDuplicate'
       .replace(/^Self transfer to\s+/i, 'Self Transfer → ')
       .trim()
 
-    const dateStr = `${dateMatch[1]} ${dateMatch[2]} ${dateMatch[3]}`
-    const dateObj = new Date(dateStr)
-    const dateISO = isNaN(dateObj.getTime()) ? '' : dateObj.toISOString().slice(0, 10)
-    if (!dateISO) { i = k + 1; continue }
+    // Parse date timezone-safely
+    const MONTHS_GP: Record<string, string> = { Jan:'01',Feb:'02',Mar:'03',Apr:'04',May:'05',Jun:'06',Jul:'07',Aug:'08',Sep:'09',Oct:'10',Nov:'11',Dec:'12' }
+    const dateISO = `${dateMatch[3]}-${MONTHS_GP[dateMatch[2]]}-${dateMatch[1].padStart(2,'0')}`
 
     rows.push({ id: utrNo || `gp-${Date.now()}-${rows.length}`, date: dateISO, description: cleanDesc, amount, type, utrNo, note: '', source: 'GPay', account })
     i = k + 1
@@ -302,6 +342,7 @@ function parsePhonePeCSV(text: string): Omit<ParsedRow, 'isDuplicate' | 'categor
       .replace(/^Received from\s+/i, '')
       .trim()
 
+    const rowAccount = instrumentToAccount(instrument) || account
     rows.push({
       id: utrNo || `ppcsv-${Date.now()}-${rows.length}`,
       date: dateStr,
@@ -311,7 +352,7 @@ function parsePhonePeCSV(text: string): Omit<ParsedRow, 'isDuplicate' | 'categor
       utrNo,
       note: '',
       source: 'PhonePe',
-      account,
+      account: rowAccount,
     })
   }
   return rows
@@ -506,6 +547,29 @@ export default function Import() {
   // Sort state
   const [sortField, setSortField] = useState<SortField>('date')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
+
+  // Drag-resizable column widths
+  const [colWidths, setColWidths] = useState({ description: 200, notes: 140 })
+  const resizingRef = useRef<{ col: 'description' | 'notes'; startX: number; startW: number } | null>(null)
+
+  const onResizeStart = useCallback((col: 'description' | 'notes', e: React.MouseEvent) => {
+    e.preventDefault()
+    const startW = col === 'description' ? colWidths.description : colWidths.notes
+    resizingRef.current = { col, startX: e.clientX, startW }
+    function onMove(ev: MouseEvent) {
+      if (!resizingRef.current) return
+      const delta = ev.clientX - resizingRef.current.startX
+      const newW = Math.max(80, resizingRef.current.startW + delta)
+      setColWidths(prev => ({ ...prev, [resizingRef.current!.col]: newW }))
+    }
+    function onUp() {
+      resizingRef.current = null
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }, [colWidths])
 
   // Filter state (multi-select via Set)
   const [filterSources, setFilterSources] = useState<Set<string>>(new Set())
@@ -947,12 +1011,21 @@ export default function Import() {
                         className="rounded" />
                     </th>
                     <th className="px-3 py-3 text-left"><SortBtn field="date" label="Date" /></th>
-                    <th className="px-3 py-3 text-left">Description</th>
-                    <th className="px-3 py-3 text-left">Notes</th>
+                    <th className="px-3 py-3 text-left relative select-none" style={{ width: colWidths.description, minWidth: 80 }}>
+                      <span>Description</span>
+                      <div onMouseDown={e => onResizeStart('description', e)}
+                        className="absolute right-0 top-0 h-full w-2 cursor-col-resize hover:bg-[#7FA68A] hover:opacity-40 transition-opacity" />
+                    </th>
+                    <th className="px-3 py-3 text-left relative select-none" style={{ width: colWidths.notes, minWidth: 80 }}>
+                      <span>Notes</span>
+                      <div onMouseDown={e => onResizeStart('notes', e)}
+                        className="absolute right-0 top-0 h-full w-2 cursor-col-resize hover:bg-[#7FA68A] hover:opacity-40 transition-opacity" />
+                    </th>
                     <th className="px-3 py-3 text-left"><SortBtn field="amount" label="Amount" /></th>
                     <th className="px-3 py-3 text-left">Category</th>
                     <th className="px-3 py-3 text-left">Type</th>
-                    <th className="px-3 py-3 text-left whitespace-nowrap">Payment Mode / Card</th>
+                    <th className="px-3 py-3 text-left">App</th>
+                    <th className="px-3 py-3 text-left whitespace-nowrap">Account</th>
                     <th className="px-3 py-3 text-left">Status</th>
                     <th className="px-3 py-3 text-left w-8"></th>
                   </tr>
@@ -967,13 +1040,13 @@ export default function Import() {
                           disabled={row.isDuplicate} className="rounded" />
                       </td>
                       <td className="px-3 py-2.5 text-gray-600 whitespace-nowrap">{fmtDate(row.date)}</td>
-                      <td className="px-3 py-2.5 w-64 min-w-[16rem]">
+                      <td className="px-3 py-2.5 overflow-hidden" style={{ width: colWidths.description, maxWidth: colWidths.description }}>
                         <input className="w-full text-gray-800 bg-transparent outline-none focus:bg-gray-50 rounded px-1 truncate"
                           value={row.description}
                           title={row.description}
                           onChange={e => updateRow(row.id, 'description', e.target.value)} />
                       </td>
-                      <td className="px-3 py-2.5 max-w-40">
+                      <td className="px-3 py-2.5 overflow-hidden" style={{ width: colWidths.notes, maxWidth: colWidths.notes }}>
                         <input className={`w-full text-xs rounded px-1 truncate outline-none placeholder:text-gray-300
                           ${row.note
                             ? 'text-gray-700 bg-[#F5F2EC] focus:bg-[#EDE9E0]'
@@ -1005,13 +1078,13 @@ export default function Import() {
                           <option value="unnecessary">Unnecessary</option>
                         </select>
                       </td>
-                      <td className="px-3 py-2.5">
-                        <div className="flex flex-col gap-0.5">
-                          <span className="text-xs bg-[#F5F2EC] text-gray-500 px-2 py-0.5 rounded-full w-fit">{row.source}</span>
-                          {row.account && (
-                            <span className="text-[10px] text-gray-400 font-medium px-2">{row.account}</span>
-                          )}
-                        </div>
+                      <td className="px-3 py-2.5 whitespace-nowrap">
+                        <span className="text-xs bg-[#F5F2EC] text-gray-500 px-2 py-0.5 rounded-full">{row.source}</span>
+                      </td>
+                      <td className="px-3 py-2.5 whitespace-nowrap">
+                        {row.account
+                          ? <span className="text-xs bg-[#E8F0FF] text-blue-600 px-2 py-0.5 rounded-full">{row.account}</span>
+                          : <span className="text-xs text-gray-300">—</span>}
                       </td>
                       <td className="px-3 py-2.5">
                         {row.isDuplicate
@@ -1027,7 +1100,7 @@ export default function Import() {
                   ))}
                   {visibleRows.length === 0 && (
                     <tr>
-                      <td colSpan={10} className="px-3 py-8 text-center text-sm text-gray-400">
+                      <td colSpan={11} className="px-3 py-8 text-center text-sm text-gray-400">
                         No rows match the current filters.
                       </td>
                     </tr>
