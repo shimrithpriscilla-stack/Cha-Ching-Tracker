@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../supabase'
-import { Edit2, AlertTriangle, CheckCircle, XCircle, Plus, Trash2 } from 'lucide-react'
+import { Edit2, AlertTriangle, CheckCircle, XCircle, Plus, Trash2, ChevronLeft, ChevronRight } from 'lucide-react'
 
 interface Category {
   id: string
@@ -8,15 +8,40 @@ interface Category {
   monthly_budget: number
   color_tag: string
   spent?: number
+  grossSpent?: number
+  credited?: number
 }
 
 function fmt(n: number) {
   return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(n)
 }
 
+function currentYM(): string {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+}
+
+function prevMonth(ym: string): string {
+  const [y, m] = ym.split('-').map(Number)
+  const d = new Date(y, m - 2, 1)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+}
+
+function nextMonth(ym: string): string {
+  const [y, m] = ym.split('-').map(Number)
+  const d = new Date(y, m, 1)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+}
+
+function ymLabel(ym: string): string {
+  const [y, m] = ym.split('-').map(Number)
+  return new Date(y, m - 1, 1).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })
+}
+
 export default function Budgets() {
   const [categories, setCategories] = useState<Category[]>([])
   const [loading, setLoading] = useState(true)
+  const [selectedMonth, setSelectedMonth] = useState(currentYM())
   const [editCat, setEditCat] = useState<Category | null>(null)
   const [nameVal, setNameVal] = useState('')
   const [budgetVal, setBudgetVal] = useState('')
@@ -28,19 +53,38 @@ export default function Budgets() {
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
 
   async function load() {
-    const now = new Date()
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10)
+    const [y, m] = selectedMonth.split('-').map(Number)
+    const monthStart = new Date(y, m - 1, 1).toISOString().slice(0, 10)
+    const monthEnd = new Date(y, m, 0).toISOString().slice(0, 10)
+
     const { data: cats } = await supabase.from('categories').select('*').order('name')
-    const { data: txns } = await supabase.from('transactions').select('category_id, amount').gte('date', monthStart)
+    const { data: txns } = await supabase.from('transactions')
+      .select('category_id, amount, spending_type')
+      .gte('date', monthStart)
+      .lte('date', monthEnd)
 
-    const spendMap: Record<string, number> = {}
-    txns?.forEach(t => { if (t.category_id) spendMap[t.category_id] = (spendMap[t.category_id] ?? 0) + t.amount })
+    const grossMap: Record<string, number> = {}
+    const creditMap: Record<string, number> = {}
 
-    setCategories((cats ?? []).map(c => ({ ...c, spent: spendMap[c.id] ?? 0 })))
+    txns?.forEach(t => {
+      if (!t.category_id) return
+      if (t.spending_type === 'credit' || t.amount < 0) {
+        creditMap[t.category_id] = (creditMap[t.category_id] ?? 0) + Math.abs(t.amount)
+      } else {
+        grossMap[t.category_id] = (grossMap[t.category_id] ?? 0) + t.amount
+      }
+    })
+
+    setCategories((cats ?? []).map(c => {
+      const grossSpent = grossMap[c.id] ?? 0
+      const credited = creditMap[c.id] ?? 0
+      const spent = Math.max(0, grossSpent - credited)
+      return { ...c, grossSpent, credited, spent }
+    }))
     setLoading(false)
   }
 
-  useEffect(() => { load() }, [])
+  useEffect(() => { load() }, [selectedMonth])
 
   async function saveBudget() {
     if (!editCat) return
@@ -65,6 +109,7 @@ export default function Budgets() {
   const totalBudget = categories.reduce((s, c) => s + c.monthly_budget, 0)
   const totalSpent = categories.reduce((s, c) => s + (c.spent ?? 0), 0)
   const overCount = categories.filter(c => (c.spent ?? 0) > c.monthly_budget).length
+  const isCurrentMonth = selectedMonth === currentYM()
 
   return (
     <div className="p-6 max-w-4xl">
@@ -78,11 +123,31 @@ export default function Budgets() {
         </button>
       </div>
 
+      {/* Month picker */}
+      <div className="flex items-center gap-3 mb-5">
+        <button onClick={() => setSelectedMonth(prevMonth(selectedMonth))}
+          className="p-1.5 rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 transition-all">
+          <ChevronLeft size={16} />
+        </button>
+        <span className="text-sm font-medium text-gray-700 min-w-36 text-center">{ymLabel(selectedMonth)}</span>
+        <button onClick={() => setSelectedMonth(nextMonth(selectedMonth))}
+          disabled={isCurrentMonth}
+          className="p-1.5 rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-50 transition-all disabled:opacity-30 disabled:cursor-not-allowed">
+          <ChevronRight size={16} />
+        </button>
+        {!isCurrentMonth && (
+          <button onClick={() => setSelectedMonth(currentYM())}
+            className="text-xs text-[#7FA68A] hover:underline ml-1">
+            Back to current
+          </button>
+        )}
+      </div>
+
       {/* Summary */}
       <div className="grid grid-cols-3 gap-4 mb-6">
         {[
           { label: 'Total Budgeted', value: fmt(totalBudget), bg: 'bg-[#C8DDD0]' },
-          { label: 'Spent (MTD)', value: fmt(totalSpent), bg: 'bg-[#C4DCF0]' },
+          { label: 'Net Spent', value: fmt(totalSpent), bg: 'bg-[#C4DCF0]' },
           { label: 'Over Budget', value: `${overCount} categories`, bg: overCount > 0 ? 'bg-[#F0CECE]' : 'bg-[#C4E8D5]' },
         ].map(card => (
           <div key={card.label} className={`${card.bg} rounded-2xl p-4`}>
@@ -97,9 +162,16 @@ export default function Budgets() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {categories.map(cat => {
             const spent = cat.spent ?? 0
+            const grossSpent = cat.grossSpent ?? 0
+            const credited = cat.credited ?? 0
             const pct = cat.monthly_budget > 0 ? Math.min((spent / cat.monthly_budget) * 100, 100) : 0
+            const grossPct = cat.monthly_budget > 0 ? Math.min((grossSpent / cat.monthly_budget) * 100, 100) : 0
             const isOver = spent > cat.monthly_budget
             const isWarn = pct >= 80 && !isOver
+            const hasCredits = credited > 0
+
+            const barColor = isOver ? '#F87171' : isWarn ? '#FBBF24' : '#7FA68A'
+            const grossBarColor = isOver ? '#FECACA' : isWarn ? '#FDE68A' : '#B8D9C3'
 
             return (
               <div key={cat.id} className={`bg-white border rounded-2xl p-4 shadow-sm transition-all hover:shadow-md ${isOver ? 'border-red-200' : isWarn ? 'border-amber-200' : 'border-gray-100'}`}>
@@ -113,8 +185,11 @@ export default function Budgets() {
 
                 <div className="flex items-end justify-between mb-2">
                   <div>
-                    <div className="text-xs text-gray-400">Spent</div>
+                    <div className="text-xs text-gray-400">Net Spent</div>
                     <div className="text-lg font-light" style={{ fontFamily: 'Georgia,serif', color: isOver ? '#F87171' : '#374151' }}>{fmt(spent)}</div>
+                    {hasCredits && (
+                      <div className="text-xs text-green-600 mt-0.5">{fmt(grossSpent)} gross − {fmt(credited)} reimbursed</div>
+                    )}
                   </div>
                   <div className="text-right">
                     <div className="text-xs text-gray-400">Budget</div>
@@ -122,12 +197,31 @@ export default function Budgets() {
                   </div>
                 </div>
 
+                {/* Stacked progress bar */}
                 <div className="flex items-center gap-2">
-                  <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
-                    <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: isOver ? '#F87171' : isWarn ? '#FBBF24' : '#7FA68A' }} />
+                  <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden relative">
+                    {/* Gross spend bar (lighter, behind) */}
+                    {hasCredits && (
+                      <div className="absolute inset-y-0 left-0 rounded-full transition-all"
+                        style={{ width: `${grossPct}%`, background: grossBarColor }} />
+                    )}
+                    {/* Net spend bar (solid, on top) */}
+                    <div className="absolute inset-y-0 left-0 rounded-full transition-all"
+                      style={{ width: `${pct}%`, background: barColor }} />
                   </div>
                   <span className="text-xs text-gray-400 w-8 text-right">{Math.round(pct)}%</span>
                 </div>
+
+                {hasCredits && (
+                  <div className="flex gap-3 mt-1.5">
+                    <div className="flex items-center gap-1 text-xs text-gray-400">
+                      <span className="w-2 h-2 rounded-full inline-block" style={{ background: grossBarColor }} /> Gross
+                    </div>
+                    <div className="flex items-center gap-1 text-xs text-gray-400">
+                      <span className="w-2 h-2 rounded-full inline-block" style={{ background: barColor }} /> Net
+                    </div>
+                  </div>
+                )}
 
                 {isOver && <div className="mt-2 text-xs bg-red-50 text-red-400 rounded-lg px-3 py-1.5">⚠️ Over by {fmt(spent - cat.monthly_budget)}</div>}
                 {isWarn && <div className="mt-2 text-xs bg-amber-50 text-amber-500 rounded-lg px-3 py-1.5">⚡ 80%+ used — watch your spend</div>}
