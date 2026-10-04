@@ -73,8 +73,8 @@ function detectPaytmAccount(fullText: string): string {
 
 // ── Parsers ──────────────────────────────────────────────────────────────────
 
-function parsePhonePe(text: string, account: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
-  const rows: Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] = []
+function parsePhonePe(text: string, account: string): Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] {
+  const rows: Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] = []
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
 
   let i = 0
@@ -142,8 +142,8 @@ function parsePhonePe(text: string, account: string): Omit<ParsedRow, 'isDuplica
   return rows
 }
 
-function parseGPay(text: string, account: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
-  const rows: Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] = []
+function parseGPay(text: string, account: string): Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] {
+  const rows: Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] = []
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
 
   let i = 0
@@ -193,8 +193,8 @@ function parseGPay(text: string, account: string): Omit<ParsedRow, 'isDuplicate'
   return rows
 }
 
-function parsePaytm(text: string, account: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
-  const rows: Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] = []
+function parsePaytm(text: string, account: string): Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] {
+  const rows: Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] = []
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
 
   let i = 0
@@ -253,8 +253,8 @@ function parsePaytm(text: string, account: string): Omit<ParsedRow, 'isDuplicate
   return rows
 }
 
-function parsePhonePeCSV(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
-  const rows: Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] = []
+function parsePhonePeCSV(text: string): Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] {
+  const rows: Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] = []
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
 
   // Find the header row — "Date,Time,Transaction Details,..."
@@ -305,7 +305,7 @@ function parsePhonePeCSV(text: string): Omit<ParsedRow, 'isDuplicate' | 'categor
   return rows
 }
 
-function detectAndParse(text: string): Omit<ParsedRow, 'isDuplicate' | 'category_id' | 'spending_type' | 'selected'>[] {
+function detectAndParse(text: string): Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] {
   if (text.includes('Paytm Statement') || text.includes('Passbook Payments History')) {
     return parsePaytm(text, detectPaytmAccount(text))
   }
