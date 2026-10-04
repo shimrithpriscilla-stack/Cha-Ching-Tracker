@@ -34,12 +34,7 @@ export default function Budgets() {
     const { data: txns } = await supabase.from('transactions').select('category_id, amount').gte('date', monthStart)
 
     const spendMap: Record<string, number> = {}
-    txns?.forEach(t => {
-      if (t.category_id) {
-        const amt = (t.spending_type === 'credit' || t.amount < 0) ? -Math.abs(t.amount) : t.amount
-        spendMap[t.category_id] = (spendMap[t.category_id] ?? 0) + amt
-      }
-    })
+    txns?.forEach(t => { if (t.category_id) spendMap[t.category_id] = (spendMap[t.category_id] ?? 0) + t.amount })
 
     setCategories((cats ?? []).map(c => ({ ...c, spent: spendMap[c.id] ?? 0 })))
     setLoading(false)
@@ -62,9 +57,7 @@ export default function Budgets() {
 
   async function addCategory() {
     if (!newName.trim()) return
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) return
-    await supabase.from('categories').insert({ name: newName.trim(), monthly_budget: Number(newBudget) || 0, color_tag: newColor, user_id: user.id })
+    await supabase.from('categories').insert({ name: newName.trim(), monthly_budget: Number(newBudget) || 0, color_tag: newColor })
     setNewName(''); setNewBudget(''); setNewColor('#C8DDD0'); setShowAdd(false)
     load()
   }

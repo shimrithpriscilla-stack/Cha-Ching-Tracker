@@ -2,7 +2,7 @@ import * as pdfjsLib from 'pdfjs-dist'
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs`
 
 import { useState } from 'react'
-import { Upload, AlertTriangle, CheckCircle, Trash2, RefreshCw, ArrowUpDown } from 'lucide-react'
+import { Upload, AlertTriangle, CheckCircle, Trash2, RefreshCw, ArrowUpDown, RotateCcw } from 'lucide-react'
 import { supabase } from '../supabase'
 
 interface SoftDupMatch {
@@ -479,6 +479,28 @@ function CategorySelect({ rowId, categories, value, onSelect, onNewCategory }: I
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
+interface ImportBatch {
+  batchId: string
+  count: number
+  importedAt: string
+  label: string   // e.g. "PhonePe · 12 txns"
+}
+
+const BATCH_HISTORY_KEY = 'import_batch_history'
+
+function loadBatchHistory(): ImportBatch[] {
+  try {
+    const raw = localStorage.getItem(BATCH_HISTORY_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : []
+  } catch { return [] }
+}
+
+function saveBatchHistory(batches: ImportBatch[]) {
+  try { localStorage.setItem(BATCH_HISTORY_KEY, JSON.stringify(batches.slice(0, 20))) } catch {}
+}
+
 export default function Import() {
   const [rows, setRows] = useState<ParsedRow[]>([])
   const [categories, setCategories] = useState<Category[]>([])
@@ -490,6 +512,9 @@ export default function Import() {
   const [committed, setCommitted] = useState(0)
   const [error, setError] = useState('')
   const [refreshingCats, setRefreshingCats] = useState(false)
+  const [batchHistory, setBatchHistory] = useState<ImportBatch[]>(() => loadBatchHistory())
+  const [undoing, setUndoing] = useState<string | null>(null)
+  const [showHistory, setShowHistory] = useState(false)
 
   // Sort state
   const [sortField, setSortField] = useState<SortField>('date')
@@ -643,7 +668,7 @@ export default function Import() {
     }
 
     setLoadingMsg('Loading categories, payment modes & note history…')
-    const [catResult, modeResult, noteHistoryResult] = await Promise.all([
+    const [catResult, modeResult, noteHistoryResult, catHistoryResult] = await Promise.all([
       supabase.from('categories').select('id, name').order('name'),
       supabase.from('payment_modes').select('id, name').order('name'),
       supabase
@@ -653,6 +678,14 @@ export default function Import() {
         .not('notes', 'eq', '')
         .order('created_at', { ascending: false })
         .limit(500),
+      // Category memory: fetch most recent category_id per merchant
+      supabase
+        .from('transactions')
+        .select('merchant, category_id, created_at')
+        .not('merchant', 'is', null)
+        .not('category_id', 'is', null)
+        .order('created_at', { ascending: false })
+        .limit(1000),
     ])
     const cats = catResult.data ?? []
     setPaymentModes(modeResult.data ?? [])
@@ -667,10 +700,27 @@ export default function Import() {
       if (userNote) merchantNoteMap.set(merchant, userNote.trim())
     }
 
+    // Build merchant → category_id memory map (most recent assignment wins)
+    const merchantCatMap = new Map<string, string>()
+    for (const row of (catHistoryResult.data ?? [])) {
+      const merchant = (row.merchant ?? '').trim().toLowerCase()
+      if (!merchant || !row.category_id) continue
+      if (merchantCatMap.has(merchant)) continue  // already have most recent
+      merchantCatMap.set(merchant, row.category_id)
+    }
+
     const withMeta: ParsedRow[] = parsed.map(r => {
       const { category, type } = autoCategory(r.description)
-      const cat = cats.find(c => c.name === category)
-      const suggestedNote = r.note || merchantNoteMap.get(r.description.trim().toLowerCase()) || ''
+      const keywordCat = cats.find(c => c.name === category)
+
+      // Category memory: prefer past human assignment for this merchant over keyword guess
+      const merchantKey = r.description.trim().toLowerCase()
+      const memoryCatId = merchantCatMap.get(merchantKey) ?? ''
+      // Verify the remembered cat_id still exists
+      const memoryCatValid = memoryCatId && cats.some(c => c.id === memoryCatId)
+      const resolvedCatId = memoryCatValid ? memoryCatId : (keywordCat?.id ?? '')
+
+      const suggestedNote = r.note || merchantNoteMap.get(merchantKey) || ''
       const hardDup = existingUtrs.has(r.utrNo)
       const softDupMatch = hardDup ? null : findSoftDup(r)
       return {
@@ -679,7 +729,7 @@ export default function Import() {
         isDuplicate: hardDup,
         isSoftDuplicate: !hardDup && softDupMatch !== null,
         softDupMatch,
-        category_id: cat?.id ?? '',
+        category_id: resolvedCatId,
         spending_type: r.type === 'credit' ? 'credit' : type,
         selected: !hardDup,
       }
@@ -728,17 +778,25 @@ export default function Import() {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) { setError('Not logged in'); setCommitting(false); return }
 
+      // Generate a batch ID for this import (used for undo)
+      const batchId = crypto.randomUUID()
+
+      // Detect the sources in this batch for a human label
+      const sources = [...new Set(toInsert.map(r => r.source))].join(', ')
+
       // Find the payment mode ID for each row's account, if it matches
       const records = toInsert.map(r => {
         const modeMatch = paymentModes.find(m => m.name.toLowerCase() === r.account.toLowerCase())
+        const isCredit = r.type === 'credit'
         return {
           user_id: user.id,
           date: r.date,
           merchant: r.description,
-          amount: r.amount,
-          spending_type: r.spending_type,
+          amount: isCredit ? -Math.abs(r.amount) : r.amount,
+          spending_type: isCredit ? 'credit' : r.spending_type,
           category_id: r.category_id || null,
           mode_id: modeMatch?.id ?? null,
+          batch_id: batchId,
           notes: [r.note, r.utrNo ? `UTR:${r.utrNo}` : '', r.source].filter(Boolean).join(' | '),
         }
       })
@@ -749,12 +807,46 @@ export default function Import() {
         setError('Import failed: ' + insertError.message)
         return
       }
+
+      // Save to batch history for undo
+      const newBatch: ImportBatch = {
+        batchId,
+        count: toInsert.length,
+        importedAt: new Date().toISOString(),
+        label: `${sources} · ${toInsert.length} txns`,
+      }
+      const updated = [newBatch, ...batchHistory]
+      saveBatchHistory(updated)
+      setBatchHistory(updated)
+
       setCommitted(toInsert.length)
       setRows([])
     } catch (e: any) {
       setError('Import failed: ' + (e.message ?? 'Unknown error'))
       setCommitting(false)
     }
+  }
+
+  async function undoBatch(batchId: string) {
+    setUndoing(batchId)
+    try {
+      const { error: delError } = await supabase
+        .from('transactions')
+        .delete()
+        .eq('batch_id', batchId)
+      if (delError) {
+        setError('Undo failed: ' + delError.message)
+        setUndoing(null)
+        return
+      }
+      // Remove from local history
+      const updated = batchHistory.filter(b => b.batchId !== batchId)
+      saveBatchHistory(updated)
+      setBatchHistory(updated)
+    } catch (e: any) {
+      setError('Undo failed: ' + (e.message ?? 'Unknown error'))
+    }
+    setUndoing(null)
   }
 
   // ── Derived: filtered + sorted rows ──────────────────────────────────────────
@@ -875,15 +967,52 @@ export default function Import() {
 
       {/* Success message */}
       {committed > 0 && rows.length === 0 && (
-        <div className="bg-[#C8DDD0] rounded-2xl p-6 flex items-center gap-4">
+        <div className="bg-[#C8DDD0] rounded-2xl p-6 flex items-center gap-4 mb-4">
           <CheckCircle size={24} className="text-[#7FA68A]" />
           <div>
             <div className="font-semibold text-gray-800">{committed} transactions imported successfully!</div>
-            <div className="text-sm text-gray-600 mt-0.5">They're now in your Transaction Ledger.</div>
+            <div className="text-sm text-gray-600 mt-0.5">They're now in your Transaction Ledger. Use "Import History" below to undo.</div>
           </div>
           <button onClick={() => setCommitted(0)} className="ml-auto text-sm text-gray-500 underline">
             Import another
           </button>
+        </div>
+      )}
+
+      {/* Import History / Undo section */}
+      {batchHistory.length > 0 && rows.length === 0 && (
+        <div className="mt-4">
+          <button
+            onClick={() => setShowHistory(h => !h)}
+            className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-700 mb-3 transition-all">
+            <RotateCcw size={14} />
+            Import History ({batchHistory.length} batches)
+            <span className="text-gray-400">{showHistory ? '▲' : '▼'}</span>
+          </button>
+          {showHistory && (
+            <div className="flex flex-col gap-2">
+              {batchHistory.map(batch => {
+                const importedAt = new Date(batch.importedAt)
+                const dateStr = importedAt.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
+                const timeStr = importedAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })
+                return (
+                  <div key={batch.batchId} className="bg-white border border-gray-100 rounded-2xl px-4 py-3 flex items-center gap-4 shadow-sm">
+                    <div className="flex-1 min-w-0">
+                      <div className="font-medium text-gray-700 text-sm truncate">{batch.label}</div>
+                      <div className="text-xs text-gray-400 mt-0.5">{dateStr} at {timeStr}</div>
+                    </div>
+                    <button
+                      onClick={() => undoBatch(batch.batchId)}
+                      disabled={undoing === batch.batchId}
+                      className="flex items-center gap-1.5 text-xs text-red-500 border border-red-200 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-xl transition-all disabled:opacity-50 flex-shrink-0">
+                      <RotateCcw size={11} className={undoing === batch.batchId ? 'animate-spin' : ''} />
+                      {undoing === batch.batchId ? 'Undoing…' : 'Undo'}
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+          )}
         </div>
       )}
 
