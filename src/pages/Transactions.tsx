@@ -63,6 +63,11 @@ export default function Transactions() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false)
   const [bulkDeleting, setBulkDeleting] = useState(false)
+  // Bulk edit
+  const [bulkEditOpen, setBulkEditOpen] = useState(false)
+  const [bulkEditSaving, setBulkEditSaving] = useState(false)
+  const [bulkCategoryId, setBulkCategoryId] = useState('')
+  const [bulkSpendingType, setBulkSpendingType] = useState('')
 
   async function load() {
     const [t, c, m, p] = await Promise.all([
@@ -110,6 +115,23 @@ export default function Transactions() {
     await supabase.from('transactions').delete().in('id', ids)
     setBulkDeleting(false)
     setBulkDeleteConfirm(false)
+    load()
+  }
+
+  async function bulkEdit() {
+    if (selectedIds.size === 0) return
+    setBulkEditSaving(true)
+    const ids = [...selectedIds]
+    const updates: Record<string, string> = {}
+    if (bulkCategoryId) updates.category_id = bulkCategoryId
+    if (bulkSpendingType) updates.spending_type = bulkSpendingType
+    if (Object.keys(updates).length > 0) {
+      await supabase.from('transactions').update(updates).in('id', ids)
+    }
+    setBulkEditSaving(false)
+    setBulkEditOpen(false)
+    setBulkCategoryId('')
+    setBulkSpendingType('')
     load()
   }
 
@@ -254,6 +276,12 @@ export default function Transactions() {
           <span className="text-sm text-red-500 font-medium flex-1">{selectedIds.size} selected</span>
           <button onClick={() => setSelectedIds(new Set())} className="text-xs text-gray-400 hover:text-gray-600">Clear</button>
           <button
+            onClick={() => { setBulkCategoryId(''); setBulkSpendingType(''); setBulkEditOpen(true) }}
+            className="flex items-center gap-1.5 bg-[#7FA68A] text-white px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-[#6d9478] transition-all"
+          >
+            <Edit2 size={12} /> Edit {selectedIds.size}
+          </button>
+          <button
             onClick={() => setBulkDeleteConfirm(true)}
             className="flex items-center gap-1.5 bg-red-400 text-white px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-red-500 transition-all"
           >
@@ -325,6 +353,43 @@ export default function Transactions() {
           )
         })}
       </div>
+
+      {/* Bulk edit modal */}
+      {bulkEditOpen && (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-xl">
+            <h2 className="text-lg font-light text-gray-800 mb-1" style={{ fontFamily: 'Georgia,serif' }}>Edit {selectedIds.size} transactions</h2>
+            <p className="text-xs text-gray-400 mb-5">Only filled fields will be updated. Leave blank to keep existing values.</p>
+            <div className="flex flex-col gap-3">
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Category</label>
+                <select className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm outline-none bg-white focus:border-[#7FA68A]"
+                  value={bulkCategoryId} onChange={e => setBulkCategoryId(e.target.value)}>
+                  <option value="">— keep existing —</option>
+                  {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Spending Type</label>
+                <select className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm outline-none bg-white focus:border-[#7FA68A]"
+                  value={bulkSpendingType} onChange={e => setBulkSpendingType(e.target.value)}>
+                  <option value="">— keep existing —</option>
+                  <option value="necessary">Necessary</option>
+                  <option value="unnecessary">Unnecessary</option>
+                  <option value="credit">Credit / Reimbursement</option>
+                </select>
+              </div>
+            </div>
+            <div className="flex gap-2 mt-5">
+              <button onClick={() => setBulkEditOpen(false)} className="flex-1 border border-gray-200 rounded-xl py-2.5 text-sm text-gray-500 hover:bg-gray-50">Cancel</button>
+              <button onClick={bulkEdit} disabled={bulkEditSaving || (!bulkCategoryId && !bulkSpendingType)}
+                className="flex-1 bg-[#7FA68A] text-white rounded-xl py-2.5 text-sm font-medium hover:bg-[#6d9478] disabled:opacity-40 transition-all">
+                {bulkEditSaving ? 'Saving…' : 'Apply'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Bulk delete confirmation modal */}
       {bulkDeleteConfirm && (
