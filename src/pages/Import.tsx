@@ -548,6 +548,8 @@ export default function Import() {
   const [filterSources, setFilterSources] = useState<Set<string>>(new Set())
   const [filterAccounts, setFilterAccounts] = useState<Set<string>>(new Set())
   const [filterTypes, setFilterTypes] = useState<Set<string>>(new Set())
+  // Hide duplicates toggle — when true, hides all rows marked as hard or soft duplicate
+  const [hideDuplicates, setHideDuplicates] = useState(false)
 
   // Persist parsed rows to localStorage on every change so reload doesn't lose work
   useEffect(() => {
@@ -598,6 +600,7 @@ export default function Import() {
     setFilterSources(new Set())
     setFilterAccounts(new Set())
     setFilterTypes(new Set())
+    setHideDuplicates(false)
 
     let text = ''
 
@@ -814,11 +817,12 @@ export default function Import() {
   }
 
   function deleteSelectedRows() {
-    // Delete rows that are visible+selected (respects current filters)
+    // Delete rows that are visible+selected (respects current filters including hideDuplicates)
     const selectedSet = new Set(
       rows
         .filter(r => {
           if (!r.selected) return false
+          if (hideDuplicates && (r.isDuplicate || r.isSoftDuplicate)) return false
           if (filterSources.size > 0 && !filterSources.has(r.source)) return false
           if (filterAccounts.size > 0 && !filterAccounts.has(r.account)) return false
           if (filterTypes.size > 0 && !filterTypes.has(r.type)) return false
@@ -956,6 +960,7 @@ export default function Import() {
 
   const visibleRows = rows
     .filter(r => {
+      if (hideDuplicates && (r.isDuplicate || r.isSoftDuplicate)) return false
       if (filterSources.size > 0 && !filterSources.has(r.source)) return false
       if (filterAccounts.size > 0 && !filterAccounts.has(r.account)) return false
       if (filterTypes.size > 0 && !filterTypes.has(r.type)) return false
@@ -1202,9 +1207,28 @@ export default function Import() {
               active={filterTypes}
               onToggle={v => toggleFilter(filterTypes, setFilterTypes, v)}
             />
-            {(filterSources.size > 0 || filterAccounts.size > 0 || filterTypes.size > 0) && (
+            {/* Hide duplicates toggle — hides both hard dups and soft dups */}
+            {(dupCount > 0 || softDupCount > 0) && (
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] text-gray-400 uppercase tracking-wide">Dupes:</span>
+                <button
+                  onClick={() => setHideDuplicates(h => !h)}
+                  className={`text-xs px-2.5 py-0.5 rounded-full border transition-all flex items-center gap-1 ${
+                    hideDuplicates
+                      ? 'bg-[#7FA68A] text-white border-[#7FA68A]'
+                      : 'bg-white text-gray-500 border-gray-200 hover:border-[#7FA68A]'
+                  }`}
+                >
+                  {hideDuplicates ? '✓ Hidden' : 'Hide dupes'}
+                  <span className={`text-[10px] rounded-full px-1 ${hideDuplicates ? 'bg-white/20 text-white' : 'bg-gray-100 text-gray-400'}`}>
+                    {dupCount + softDupCount}
+                  </span>
+                </button>
+              </div>
+            )}
+            {(filterSources.size > 0 || filterAccounts.size > 0 || filterTypes.size > 0 || hideDuplicates) && (
               <button
-                onClick={() => { setFilterSources(new Set()); setFilterAccounts(new Set()); setFilterTypes(new Set()) }}
+                onClick={() => { setFilterSources(new Set()); setFilterAccounts(new Set()); setFilterTypes(new Set()); setHideDuplicates(false) }}
                 className="text-xs text-gray-400 hover:text-gray-600 underline ml-auto"
               >
                 Clear filters
