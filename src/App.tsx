@@ -8,6 +8,7 @@ import Budgets from './pages/Budgets'
 import Analysis from './pages/Analysis'
 import IncomeVsSpend from './pages/IncomeVsSpend'
 import Import from './pages/Import'
+import Settings from './pages/Settings'
 
 const PAGES: Record<string, React.ReactElement> = {
   income: <Income />,
@@ -15,7 +16,8 @@ const PAGES: Record<string, React.ReactElement> = {
   budgets: <Budgets />,
   analysis: <Analysis />,
   compare: <IncomeVsSpend />,
-    import: <Import />,
+  import: <Import />,
+  settings: <Settings />,
 }
 
 export default function App() {

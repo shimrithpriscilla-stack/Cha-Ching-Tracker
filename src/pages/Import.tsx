@@ -784,10 +784,42 @@ export default function Import() {
       // Detect the sources in this batch for a human label
       const sources = [...new Set(toInsert.map(r => r.source))].join(', ')
 
+      // Fetch user's source accounts for matching
+      const { data: sourceAccounts } = await supabase
+        .from('source_accounts')
+        .select('id, bank_name, last4')
+        .eq('user_id', user.id)
+      const sa = sourceAccounts ?? []
+
+      // Match a parsed row's account name + optional last4 to a source account
+      function matchSourceAccount(account: string, utrNo: string): string | null {
+        if (!account) return null
+        // Try to extract last4 from UTR or account string (PhonePe: "XXXXXX1802" suffix)
+        const last4Match = utrNo.match(/\d{4}$/) ?? account.match(/\d{4}$/)
+        const last4 = last4Match?.[0] ?? null
+
+        // First try: bank name match + last4 match (most specific)
+        if (last4) {
+          const byBothFields = sa.find(a =>
+            a.bank_name.toLowerCase() === account.toLowerCase() &&
+            a.last4 === last4
+          )
+          if (byBothFields) return byBothFields.id
+        }
+
+        // Second try: bank name contains / is contained in account name (partial match)
+        const byName = sa.find(a =>
+          account.toLowerCase().includes(a.bank_name.toLowerCase()) ||
+          a.bank_name.toLowerCase().includes(account.toLowerCase())
+        )
+        return byName?.id ?? null
+      }
+
       // Find the payment mode ID for each row's account, if it matches
       const records = toInsert.map(r => {
         const modeMatch = paymentModes.find(m => m.name.toLowerCase() === r.account.toLowerCase())
         const isCredit = r.type === 'credit'
+        const sourceAccountId = matchSourceAccount(r.account, r.utrNo)
         return {
           user_id: user.id,
           date: r.date,
@@ -797,7 +829,9 @@ export default function Import() {
           category_id: r.category_id || null,
           mode_id: modeMatch?.id ?? null,
           batch_id: batchId,
-          notes: [r.note, r.utrNo ? `UTR:${r.utrNo}` : '', r.source].filter(Boolean).join(' | '),
+          source_account_id: sourceAccountId,
+          // Only store user-provided note; UTR stored internally for dedup only
+          notes: [r.note, r.utrNo ? `UTR:${r.utrNo}` : ''].filter(Boolean).join(' | '),
         }
       })
 

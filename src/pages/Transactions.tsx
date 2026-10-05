@@ -12,6 +12,7 @@ interface Transaction {
   categories?: { name: string }
   payment_modes?: { name: string }
   platforms?: { name: string }
+  source_accounts?: { id: string; label: string; color: string | null; account_type: string } | null
 }
 
 interface DropdownItem { id: string; name: string }
@@ -45,11 +46,13 @@ export default function Transactions() {
   const [categories, setCategories] = useState<DropdownItem[]>([])
   const [modes, setModes] = useState<DropdownItem[]>([])
   const [platforms, setPlatforms] = useState<DropdownItem[]>([])
+  const [sourceAccounts, setSourceAccounts] = useState<{ id: string; label: string; color: string | null }[]>([])
   const [loading, setLoading] = useState(true)
   const [period, setPeriod] = useState<Period>('month')
   const [search, setSearch] = useState('')
   const [filterCat, setFilterCat] = useState('all')
   const [filterType, setFilterType] = useState('all')
+  const [filterAccount, setFilterAccount] = useState('all')
   const [sortField, setSortField] = useState<SortField>('date')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
   const [showForm, setShowForm] = useState(false)
@@ -70,16 +73,19 @@ export default function Transactions() {
   const [bulkSpendingType, setBulkSpendingType] = useState('')
 
   async function load() {
-    const [t, c, m, p] = await Promise.all([
-      supabase.from('transactions').select('*, categories(name), payment_modes(name), platforms(name)').gte('date', getPeriodStart(period)).order('date', { ascending: false }),
+    const { data: { user } } = await supabase.auth.getUser()
+    const [t, c, m, p, sa] = await Promise.all([
+      supabase.from('transactions').select('*, categories(name), payment_modes(name), platforms(name), source_accounts(id, label, color, account_type)').gte('date', getPeriodStart(period)).order('date', { ascending: false }),
       supabase.from('categories').select('id, name').order('name'),
       supabase.from('payment_modes').select('id, name').order('name'),
       supabase.from('platforms').select('id, name').order('name'),
+      user ? supabase.from('source_accounts').select('id, label, color').eq('user_id', user.id).order('label') : Promise.resolve({ data: [] }),
     ])
     setTxns(t.data ?? [])
     setCategories(c.data ?? [])
     setModes(m.data ?? [])
     setPlatforms(p.data ?? [])
+    setSourceAccounts((sa as any).data ?? [])
     setSelectedIds(new Set())
     setLoading(false)
   }
@@ -166,6 +172,7 @@ export default function Transactions() {
     .filter(t => {
       if (filterCat !== 'all' && t.categories?.name !== filterCat) return false
       if (filterType !== 'all' && t.spending_type !== filterType) return false
+      if (filterAccount !== 'all' && t.source_accounts?.id !== filterAccount) return false
       if (search) {
         const q = search.toLowerCase()
         const inMerchant = (t.merchant ?? '').toLowerCase().includes(q)
@@ -236,6 +243,13 @@ export default function Transactions() {
           <option value="unnecessary">Unnecessary</option>
           <option value="credit">Credit</option>
         </select>
+        {sourceAccounts.length > 0 && (
+          <select className="border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none bg-white text-gray-600"
+            value={filterAccount} onChange={e => setFilterAccount(e.target.value)}>
+            <option value="all">All Accounts</option>
+            {sourceAccounts.map(a => <option key={a.id} value={a.id}>{a.label}</option>)}
+          </select>
+        )}
       </div>
 
       {/* Sort controls */}
@@ -300,6 +314,8 @@ export default function Transactions() {
           const subLine = t.merchant?.trim() && t.categories?.name
             ? t.categories.name
             : null
+          // Strip UTR from displayed notes so user only sees their own note
+          const displayNotes = (t.notes ?? '').replace(/UTR:[^\s|]+\s*\|?\s*/g, '').trim().replace(/^\||\|$/g, '').trim()
 
           return (
             <div key={t.id}
@@ -327,7 +343,7 @@ export default function Transactions() {
                   {subLine && (
                     <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">{subLine}</span>
                   )}
-                  {t.notes && <p className="text-xs text-gray-400 truncate">{t.notes}</p>}
+                  {displayNotes && <p className="text-xs text-gray-400 truncate">{displayNotes}</p>}
                 </div>
                 <div className="flex gap-1.5 mt-1 flex-wrap">
                   <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
@@ -337,6 +353,12 @@ export default function Transactions() {
                   }`}>
                     {t.spending_type === 'necessary' ? 'Necessary' : t.spending_type === 'credit' ? 'Credit' : 'Discretionary'}
                   </span>
+                  {t.source_accounts && (
+                    <span className="text-xs px-2 py-0.5 rounded-full font-medium text-gray-600"
+                      style={{ background: t.source_accounts.color ?? '#E5E7EB' }}>
+                      {t.source_accounts.label}
+                    </span>
+                  )}
                   {t.payment_modes?.name && <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">{t.payment_modes.name}</span>}
                   {t.platforms?.name && <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">{t.platforms.name}</span>}
                 </div>
