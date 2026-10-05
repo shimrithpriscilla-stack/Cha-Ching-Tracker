@@ -1,7 +1,7 @@
 import * as pdfjsLib from 'pdfjs-dist'
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs`
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Upload, AlertTriangle, CheckCircle, Trash2, RefreshCw, ArrowUpDown, RotateCcw } from 'lucide-react'
 import { supabase } from '../supabase'
 
@@ -487,6 +487,30 @@ interface ImportBatch {
 }
 
 const BATCH_HISTORY_KEY = 'import_batch_history'
+const IMPORT_DRAFT_KEY = 'cc_import_draft'
+
+function loadDraft(): ParsedRow[] {
+  try {
+    const raw = localStorage.getItem(IMPORT_DRAFT_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : []
+  } catch { return [] }
+}
+
+function saveDraft(rows: ParsedRow[]) {
+  try {
+    if (rows.length === 0) {
+      localStorage.removeItem(IMPORT_DRAFT_KEY)
+    } else {
+      localStorage.setItem(IMPORT_DRAFT_KEY, JSON.stringify(rows))
+    }
+  } catch {}
+}
+
+function clearDraft() {
+  try { localStorage.removeItem(IMPORT_DRAFT_KEY) } catch {}
+}
 
 function loadBatchHistory(): ImportBatch[] {
   try {
@@ -502,7 +526,7 @@ function saveBatchHistory(batches: ImportBatch[]) {
 }
 
 export default function Import() {
-  const [rows, setRows] = useState<ParsedRow[]>([])
+  const [rows, setRows] = useState<ParsedRow[]>(() => loadDraft())
   const [categories, setCategories] = useState<Category[]>([])
   const [paymentModes, setPaymentModes] = useState<PaymentMode[]>([])
   const [dragging, setDragging] = useState(false)
@@ -524,6 +548,23 @@ export default function Import() {
   const [filterSources, setFilterSources] = useState<Set<string>>(new Set())
   const [filterAccounts, setFilterAccounts] = useState<Set<string>>(new Set())
   const [filterTypes, setFilterTypes] = useState<Set<string>>(new Set())
+
+  // Persist parsed rows to localStorage on every change so reload doesn't lose work
+  useEffect(() => {
+    saveDraft(rows)
+  }, [rows])
+
+  // Load categories from DB if rows were restored from draft (so dropdowns work)
+  useEffect(() => {
+    if (rows.length > 0 && categories.length === 0) {
+      supabase.from('categories').select('id, name').order('name').then(({ data }) => {
+        if (data) setCategories(data)
+      })
+      supabase.from('payment_modes').select('id, name').order('name').then(({ data }) => {
+        if (data) setPaymentModes(data)
+      })
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   function toggleSort(field: SortField) {
     if (sortField === field) {
@@ -758,11 +799,34 @@ export default function Import() {
   }
 
   function updateRow(id: string, field: string, value: string) {
-    setRows(rows.map(r => r.id === id ? { ...r, [field]: value } : r))
+    setRows(rows.map(r => {
+      if (r.id !== id) return r
+      if (field === 'amount') {
+        const n = parseFloat(value)
+        return { ...r, amount: isNaN(n) ? r.amount : n }
+      }
+      return { ...r, [field]: value }
+    }))
   }
 
   function deleteRow(id: string) {
     setRows(rows.filter(r => r.id !== id))
+  }
+
+  function deleteSelectedRows() {
+    // Delete rows that are visible+selected (respects current filters)
+    const selectedSet = new Set(
+      rows
+        .filter(r => {
+          if (!r.selected) return false
+          if (filterSources.size > 0 && !filterSources.has(r.source)) return false
+          if (filterAccounts.size > 0 && !filterAccounts.has(r.account)) return false
+          if (filterTypes.size > 0 && !filterTypes.has(r.type)) return false
+          return true
+        })
+        .map(r => r.id)
+    )
+    setRows(rows.filter(r => !selectedSet.has(r.id)))
   }
 
   function handleNewCategory(cat: Category) {
@@ -854,6 +918,7 @@ export default function Import() {
       setBatchHistory(updated)
 
       setCommitted(toInsert.length)
+      clearDraft()
       setRows([])
     } catch (e: any) {
       setError('Import failed: ' + (e.message ?? 'Unknown error'))
@@ -960,6 +1025,19 @@ export default function Import() {
           <AlertTriangle size={16} className="mt-0.5 flex-shrink-0" />
           <span>{error}</span>
           <button onClick={() => setError('')} className="ml-auto text-red-400 hover:text-red-600">✕</button>
+        </div>
+      )}
+
+      {/* Draft restored banner + mini upload trigger */}
+      {rows.length > 0 && !loading && (
+        <div className="mb-3 bg-[#F5F2EC] border border-[#C8DDD0] text-gray-600 rounded-xl px-4 py-2.5 text-sm flex items-center gap-3">
+          <span className="text-[#7FA68A]">✓</span>
+          <span className="flex-1">Draft restored — {rows.length} rows. Review and import, or clear all to start fresh.</span>
+          <label className="cursor-pointer text-xs text-[#7FA68A] hover:underline flex items-center gap-1">
+            <Upload size={11} /> Upload another
+            <input type="file" accept=".pdf,.csv,.xlsx" className="hidden"
+              onChange={e => { if (e.target.files?.[0]) processFile(e.target.files[0]) }} />
+          </label>
         </div>
       )}
 
@@ -1085,10 +1163,16 @@ export default function Import() {
               Refresh categories
             </button>
             <div className="ml-auto flex gap-2">
-              <button onClick={() => { setRows([]); setError('') }}
+              <button onClick={() => { clearDraft(); setRows([]); setError('') }}
                 className="text-sm text-gray-400 hover:text-gray-600 border border-gray-200 rounded-xl px-4 py-2">
-                Clear
+                Clear all
               </button>
+              {selectedCount > 0 && (
+                <button onClick={deleteSelectedRows}
+                  className="flex items-center gap-1.5 text-sm text-red-400 hover:text-red-600 border border-red-200 bg-red-50 hover:bg-red-100 rounded-xl px-4 py-2 transition-all">
+                  <Trash2 size={13} /> Delete {selectedCount}
+                </button>
+              )}
               <button onClick={commit} disabled={committing || selectedCount === 0}
                 className="bg-[#7FA68A] text-white rounded-xl px-6 py-2 text-sm font-medium hover:bg-[#6d9478] disabled:opacity-50 transition-all">
                 {committing ? 'Importing…' : `Import ${selectedCount} transactions`}
@@ -1158,7 +1242,12 @@ export default function Import() {
                         <input type="checkbox" checked={row.selected} onChange={() => toggleRow(row.id)}
                           disabled={row.isDuplicate} className="rounded" />
                       </td>
-                      <td className="px-3 py-2.5 text-gray-600 whitespace-nowrap">{fmtDate(row.date)}</td>
+                      <td className="px-3 py-2.5 whitespace-nowrap">
+                        <input type="date"
+                          className="text-xs text-gray-600 bg-transparent border-b border-transparent hover:border-gray-200 focus:border-[#7FA68A] outline-none cursor-pointer"
+                          value={row.date}
+                          onChange={e => updateRow(row.id, 'date', e.target.value)} />
+                      </td>
                       <td className="px-3 py-2.5 max-w-48">
                         <input className="w-full text-gray-800 bg-transparent outline-none focus:bg-gray-50 rounded px-1 truncate"
                           value={row.description}
@@ -1175,9 +1264,13 @@ export default function Import() {
                           onChange={e => updateRow(row.id, 'note', e.target.value)} />
                       </td>
                       <td className="px-3 py-2.5 whitespace-nowrap">
-                        <span className={row.type === 'credit' ? 'text-[#7FA68A] font-medium' : 'text-gray-800'}>
-                          {row.type === 'credit' ? '+' : '-'}{fmt(row.amount)}
-                        </span>
+                        <div className="flex items-center gap-1">
+                          <span className={row.type === 'credit' ? 'text-[#7FA68A] font-medium' : 'text-gray-800'}>{row.type === 'credit' ? '+' : '−'}</span>
+                          <input type="number" min="0" step="0.01"
+                            className={`w-20 text-sm bg-transparent border-b border-transparent hover:border-gray-200 focus:border-[#7FA68A] outline-none ${row.type === 'credit' ? 'text-[#7FA68A] font-medium' : 'text-gray-800'}`}
+                            value={row.amount}
+                            onChange={e => updateRow(row.id, 'amount', e.target.value)} />
+                        </div>
                       </td>
                       <td className="px-3 py-2.5">
                         <CategorySelect
@@ -1197,11 +1290,22 @@ export default function Import() {
                         </select>
                       </td>
                       <td className="px-3 py-2.5">
-                        <div className="flex flex-col gap-0.5">
-                          <span className="text-xs bg-[#F5F2EC] text-gray-500 px-2 py-0.5 rounded-full w-fit">{row.source}</span>
-                          {row.account && (
-                            <span className="text-[10px] text-gray-400 font-medium px-2">{row.account}</span>
-                          )}
+                        <div className="flex flex-col gap-1">
+                          <select
+                            className="text-xs bg-[#F5F2EC] text-gray-500 px-2 py-0.5 rounded-full border-none outline-none cursor-pointer hover:bg-[#EDE9E0] w-fit"
+                            value={row.source}
+                            onChange={e => updateRow(row.id, 'source', e.target.value)}
+                          >
+                            {['GPay', 'PhonePe', 'Paytm', ''].map(s => (
+                              <option key={s} value={s}>{s || '—'}</option>
+                            ))}
+                          </select>
+                          <input
+                            className="text-[10px] text-gray-400 font-medium px-2 bg-transparent border-b border-transparent hover:border-gray-200 focus:border-[#7FA68A] outline-none w-24"
+                            placeholder="account…"
+                            value={row.account}
+                            onChange={e => updateRow(row.id, 'account', e.target.value)}
+                          />
                         </div>
                       </td>
                       <td className="px-3 py-2.5">

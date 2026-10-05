@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { supabase } from '../supabase'
-import { Plus, Search, Edit2, Trash2, ArrowUpDown, CheckSquare, Square } from 'lucide-react'
+import { Plus, Search, Edit2, Trash2, ArrowUpDown, CheckSquare, Square, Download, ChevronDown, X } from 'lucide-react'
 
 interface Transaction {
   id: string
@@ -53,6 +53,15 @@ export default function Transactions() {
   const [filterCat, setFilterCat] = useState('all')
   const [filterType, setFilterType] = useState('all')
   const [filterAccount, setFilterAccount] = useState('all')
+  const [filterAppSource, setFilterAppSource] = useState('all')
+  const [filterMode, setFilterMode] = useState('all')
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo, setDateTo] = useState('')
+  const [amtMin, setAmtMin] = useState('')
+  const [amtMax, setAmtMax] = useState('')
+  const [showMoreFilters, setShowMoreFilters] = useState(false)
+  const [form_source_account_id, setFormSourceAccountId] = useState('')
+  const [form_app_source, setFormAppSource] = useState('')
   const [sortField, setSortField] = useState<SortField>('date')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
   const [showForm, setShowForm] = useState(false)
@@ -113,17 +122,33 @@ export default function Transactions() {
 
   async function save() {
     if (!form.amount || !form.date) return
+    // Rebuild notes: keep user note, replace APP: tag with new selection
+    const baseNotes = form.notes
+      .replace(/APP:[^\s|]+\s*\|?\s*/g, '')
+      .replace(/UTR:[^\s|]+\s*\|?\s*/g, '')
+      .trim().replace(/^\||\|$/g, '').trim()
+    const appTag = form_app_source ? `APP:${form_app_source}` : ''
+    // Preserve existing UTR from original notes (don't lose it on edit)
+    const existingTxn = txns.find(t => t.id === editId)
+    const utrMatch = existingTxn ? (existingTxn.notes ?? '').match(/UTR:[^\s|]+/) : null
+    const utrTag = utrMatch ? utrMatch[0] : ''
+    const rebuiltNotes = [baseNotes, appTag, utrTag].filter(Boolean).join(' | ')
+    const isCredit = form.spending_type === 'credit'
     const payload = {
       ...form,
-      amount: Number(form.amount),
+      amount: isCredit ? -Math.abs(Number(form.amount)) : Math.abs(Number(form.amount)),
       category_id: form.category_id || null,
       mode_id: form.mode_id || null,
       platform_id: form.platform_id || null,
       merchant: form.merchant.trim() || null,
+      notes: rebuiltNotes,
+      source_account_id: form_source_account_id || null,
     }
     if (editId) await supabase.from('transactions').update(payload).eq('id', editId)
     else await supabase.from('transactions').insert(payload)
     setShowForm(false); setEditId(null)
+    setFormSourceAccountId('')
+    setFormAppSource('')
     setForm({ date: new Date().toISOString().slice(0, 10), amount: '', category_id: '', mode_id: '', platform_id: '', spending_type: 'necessary', notes: '', merchant: '' })
     load()
   }
@@ -178,7 +203,11 @@ export default function Transactions() {
 
   function openEdit(t: Transaction) {
     setEditId(t.id)
-    setForm({ date: t.date.slice(0, 10), amount: String(t.amount), category_id: '', mode_id: '', platform_id: '', spending_type: t.spending_type, notes: t.notes ?? '', merchant: t.merchant ?? '' })
+    setForm({ date: t.date.slice(0, 10), amount: String(Math.abs(t.amount)), category_id: (t as any).category_id ?? '', mode_id: (t as any).mode_id ?? '', platform_id: (t as any).platform_id ?? '', spending_type: t.spending_type, notes: t.notes ?? '', merchant: t.merchant ?? '' })
+    setFormSourceAccountId((t as any).source_account_id ?? (t.source_accounts?.id ?? ''))
+    // Extract current app source from notes
+    const appMatch = (t.notes ?? '').match(/APP:([^\s|]+)/)
+    setFormAppSource(appMatch?.[1] ?? '')
     setShowForm(true)
   }
 
@@ -192,6 +221,16 @@ export default function Transactions() {
       if (filterCat !== 'all' && t.categories?.name !== filterCat) return false
       if (filterType !== 'all' && t.spending_type !== filterType) return false
       if (filterAccount !== 'all' && t.source_accounts?.id !== filterAccount) return false
+      if (filterMode !== 'all' && t.payment_modes?.name !== filterMode) return false
+      if (filterAppSource !== 'all') {
+        const appMatch = (t.notes ?? '').match(/APP:([^\s|]+)/)
+        if (!appMatch || appMatch[1] !== filterAppSource) return false
+      }
+      if (dateFrom && t.date < dateFrom) return false
+      if (dateTo && t.date > dateTo) return false
+      const absAmount = Math.abs(t.amount)
+      if (amtMin && absAmount < parseFloat(amtMin)) return false
+      if (amtMax && absAmount > parseFloat(amtMax)) return false
       if (search) {
         const q = search.toLowerCase()
         const inMerchant = (t.merchant ?? '').toLowerCase().includes(q)
@@ -213,6 +252,34 @@ export default function Transactions() {
   const total = filtered.reduce((s, t) => s + t.amount, 0)
   const filteredIds = filtered.map(t => t.id)
   const allSelected = filteredIds.length > 0 && filteredIds.every(id => selectedIds.has(id))
+  const hasActiveFilters = filterCat !== 'all' || filterType !== 'all' || filterAccount !== 'all' || filterMode !== 'all' || filterAppSource !== 'all' || dateFrom || dateTo || amtMin || amtMax
+
+  function clearAllFilters() {
+    setFilterCat('all'); setFilterType('all'); setFilterAccount('all')
+    setFilterMode('all'); setFilterAppSource('all')
+    setDateFrom(''); setDateTo(''); setAmtMin(''); setAmtMax('')
+    setSearch('')
+  }
+
+  function exportCSV() {
+    const header = 'Date,Merchant,Amount,Spending Type,Category,Mode,Platform,Account,Notes'
+    const rows = filtered.map(t => {
+      const displayNotes = (t.notes ?? '').replace(/APP:[^\s|]+\s*\|?\s*/g, '').replace(/UTR:[^\s|]+\s*\|?\s*/g, '').trim().replace(/^\||\|$/g, '').trim()
+      const esc = (s: string) => `"${(s ?? '').replace(/"/g, '""')}"`
+      return [
+        t.date, esc(t.merchant ?? ''), t.amount,
+        esc(t.spending_type), esc(t.categories?.name ?? ''),
+        esc(t.payment_modes?.name ?? ''), esc(t.platforms?.name ?? ''),
+        esc(t.source_accounts?.label ?? ''), esc(displayNotes)
+      ].join(',')
+    })
+    const csv = [header, ...rows].join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url; a.download = `transactions_${new Date().toISOString().slice(0, 10)}.csv`
+    a.click(); URL.revokeObjectURL(url)
+  }
 
   const PERIODS: { key: Period; label: string }[] = [
     { key: '7d', label: '7 Days' }, { key: '30d', label: '30 Days' },
@@ -226,10 +293,16 @@ export default function Transactions() {
           <h1 className="text-2xl font-light text-gray-800" style={{ fontFamily: 'Georgia,serif' }}>Transaction Ledger</h1>
           <p className="text-gray-400 text-sm mt-1">Every rupee, tracked.</p>
         </div>
-        <button onClick={() => { setShowForm(true); setEditId(null) }}
-          className="flex items-center gap-2 bg-[#7FA68A] text-white px-4 py-2 rounded-xl text-sm font-medium hover:bg-[#6d9478] transition-all">
-          <Plus size={15} /> Add
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={exportCSV} title="Export current view as CSV"
+            className="flex items-center gap-1.5 border border-gray-200 text-gray-500 px-3 py-2 rounded-xl text-sm hover:bg-gray-50 transition-all">
+            <Download size={14} /> CSV
+          </button>
+          <button onClick={() => { setShowForm(true); setEditId(null) }}
+            className="flex items-center gap-2 bg-[#7FA68A] text-white px-4 py-2 rounded-xl text-sm font-medium hover:bg-[#6d9478] transition-all">
+            <Plus size={15} /> Add
+          </button>
+        </div>
       </div>
 
       {/* Period pills */}
@@ -244,30 +317,85 @@ export default function Transactions() {
       </div>
 
       {/* Filters */}
-      <div className="flex gap-3 mb-3 flex-wrap">
-        <div className="flex-1 min-w-48 relative">
-          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-          <input className="w-full border border-gray-200 rounded-xl pl-9 pr-4 py-2 text-sm outline-none focus:border-[#7FA68A]"
-            placeholder="Search merchant, notes, category…" value={search} onChange={e => setSearch(e.target.value)} />
-        </div>
-        <select className="border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none bg-white text-gray-600"
-          value={filterCat} onChange={e => setFilterCat(e.target.value)}>
-          <option value="all">All Categories</option>
-          {categories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
-        </select>
-        <select className="border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none bg-white text-gray-600"
-          value={filterType} onChange={e => setFilterType(e.target.value)}>
-          <option value="all">All Types</option>
-          <option value="necessary">Necessary</option>
-          <option value="unnecessary">Unnecessary</option>
-          <option value="credit">Credit</option>
-        </select>
-        {sourceAccounts.length > 0 && (
+      <div className="flex flex-col gap-2 mb-3">
+        <div className="flex gap-2 flex-wrap items-center">
+          <div className="flex-1 min-w-48 relative">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+            <input className="w-full border border-gray-200 rounded-xl pl-9 pr-4 py-2 text-sm outline-none focus:border-[#7FA68A]"
+              placeholder="Search merchant, notes, category…" value={search} onChange={e => setSearch(e.target.value)} />
+          </div>
           <select className="border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none bg-white text-gray-600"
-            value={filterAccount} onChange={e => setFilterAccount(e.target.value)}>
-            <option value="all">All Accounts</option>
-            {sourceAccounts.map(a => <option key={a.id} value={a.id}>{a.label}</option>)}
+            value={filterCat} onChange={e => setFilterCat(e.target.value)}>
+            <option value="all">All Categories</option>
+            {categories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
           </select>
+          <select className="border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none bg-white text-gray-600"
+            value={filterType} onChange={e => setFilterType(e.target.value)}>
+            <option value="all">All Types</option>
+            <option value="necessary">Necessary</option>
+            <option value="unnecessary">Unnecessary</option>
+            <option value="credit">Credit</option>
+          </select>
+          {sourceAccounts.length > 0 && (
+            <select className="border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none bg-white text-gray-600"
+              value={filterAccount} onChange={e => setFilterAccount(e.target.value)}>
+              <option value="all">All Accounts</option>
+              {sourceAccounts.map(a => <option key={a.id} value={a.id}>{a.label}</option>)}
+            </select>
+          )}
+          <button
+            onClick={() => setShowMoreFilters(v => !v)}
+            className={`flex items-center gap-1.5 text-sm px-3 py-2 rounded-xl border transition-all ${showMoreFilters ? 'border-[#7FA68A] text-[#7FA68A] bg-[#F2F8F4]' : 'border-gray-200 text-gray-500 hover:border-gray-300'}`}>
+            <ChevronDown size={13} className={`transition-transform ${showMoreFilters ? 'rotate-180' : ''}`} />
+            More filters
+            {(filterMode !== 'all' || filterAppSource !== 'all' || dateFrom || dateTo || amtMin || amtMax) && (
+              <span className="w-4 h-4 rounded-full bg-[#7FA68A] text-white text-[9px] flex items-center justify-center">
+                {[filterMode !== 'all', filterAppSource !== 'all', !!(dateFrom || dateTo), !!(amtMin || amtMax)].filter(Boolean).length}
+              </span>
+            )}
+          </button>
+          {hasActiveFilters && (
+            <button onClick={clearAllFilters} className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition-all">
+              <X size={11} /> Clear filters
+            </button>
+          )}
+        </div>
+
+        {showMoreFilters && (
+          <div className="flex gap-2 flex-wrap items-center bg-gray-50 rounded-xl px-4 py-3 border border-gray-100">
+            <select className="border border-gray-200 rounded-xl px-3 py-1.5 text-xs outline-none bg-white text-gray-600"
+              value={filterAppSource} onChange={e => setFilterAppSource(e.target.value)}>
+              <option value="all">All Apps</option>
+              <option value="GPay">GPay</option>
+              <option value="PhonePe">PhonePe</option>
+              <option value="Paytm">Paytm</option>
+            </select>
+            {modes.length > 0 && (
+              <select className="border border-gray-200 rounded-xl px-3 py-1.5 text-xs outline-none bg-white text-gray-600"
+                value={filterMode} onChange={e => setFilterMode(e.target.value)}>
+                <option value="all">All Modes</option>
+                {modes.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
+              </select>
+            )}
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] text-gray-400 uppercase tracking-wide">Date</span>
+              <input type="date" className="border border-gray-200 rounded-xl px-2.5 py-1.5 text-xs outline-none bg-white"
+                value={dateFrom} onChange={e => setDateFrom(e.target.value)} />
+              <span className="text-gray-300">→</span>
+              <input type="date" className="border border-gray-200 rounded-xl px-2.5 py-1.5 text-xs outline-none bg-white"
+                value={dateTo} onChange={e => setDateTo(e.target.value)} />
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] text-gray-400 uppercase tracking-wide">Amount</span>
+              <input type="number" placeholder="Min" min="0"
+                className="border border-gray-200 rounded-xl px-2.5 py-1.5 text-xs outline-none bg-white w-20"
+                value={amtMin} onChange={e => setAmtMin(e.target.value)} />
+              <span className="text-gray-300">–</span>
+              <input type="number" placeholder="Max" min="0"
+                className="border border-gray-200 rounded-xl px-2.5 py-1.5 text-xs outline-none bg-white w-20"
+                value={amtMax} onChange={e => setAmtMax(e.target.value)} />
+            </div>
+          </div>
         )}
       </div>
 
@@ -285,22 +413,24 @@ export default function Transactions() {
       </div>
 
       {/* Count + total + select-all bar */}
-      <div className="flex justify-between items-center mb-3 text-sm text-gray-400">
+      <div className="flex justify-between items-center mb-3">
         <div className="flex items-center gap-3">
-          <span>{filtered.length} transactions</span>
+          <span className="text-sm text-gray-400">{filtered.length} transaction{filtered.length !== 1 ? 's' : ''}</span>
           {filtered.length > 0 && (
             <button
               onClick={() => toggleSelectAll(filteredIds)}
-              className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-[#7FA68A] transition-all"
+              className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border transition-all ${
+                allSelected
+                  ? 'bg-[#F2F8F4] border-[#7FA68A] text-[#7FA68A] font-medium'
+                  : 'border-gray-200 text-gray-400 hover:border-[#7FA68A] hover:text-[#7FA68A]'
+              }`}
             >
-              {allSelected
-                ? <CheckSquare size={13} className="text-[#7FA68A]" />
-                : <Square size={13} />}
-              {allSelected ? `Deselect all ${filtered.length}` : `Select all ${filtered.length}`}
+              {allSelected ? <CheckSquare size={12} /> : <Square size={12} />}
+              {allSelected ? 'Deselect all' : `Select all ${filtered.length}`}
             </button>
           )}
         </div>
-        <span>Total: <strong className="text-gray-700">{fmt(total)}</strong></span>
+        <span className="text-sm text-gray-400">Total: <strong className="text-gray-700">{fmt(total)}</strong></span>
       </div>
 
       {/* Bulk action bar */}
@@ -501,9 +631,25 @@ export default function Transactions() {
               </div>
               <input placeholder="Notes" className="border border-gray-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:border-[#7FA68A]"
                 value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} />
+              <div className="grid grid-cols-2 gap-3">
+                {sourceAccounts.length > 0 && (
+                  <select className="border border-gray-200 rounded-xl px-4 py-2.5 text-sm outline-none bg-white"
+                    value={form_source_account_id} onChange={e => setFormSourceAccountId(e.target.value)}>
+                    <option value="">Account (optional)</option>
+                    {sourceAccounts.map(a => <option key={a.id} value={a.id}>{a.label}</option>)}
+                  </select>
+                )}
+                <select className="border border-gray-200 rounded-xl px-4 py-2.5 text-sm outline-none bg-white"
+                  value={form_app_source} onChange={e => setFormAppSource(e.target.value)}>
+                  <option value="">App Source</option>
+                  <option value="GPay">GPay</option>
+                  <option value="PhonePe">PhonePe</option>
+                  <option value="Paytm">Paytm</option>
+                </select>
+              </div>
             </div>
             <div className="flex gap-2 mt-4">
-              <button onClick={() => { setShowForm(false); setEditId(null) }} className="flex-1 border border-gray-200 rounded-xl py-2.5 text-sm text-gray-500 hover:bg-gray-50">Cancel</button>
+              <button onClick={() => { setShowForm(false); setEditId(null); setFormSourceAccountId(''); setFormAppSource('') }} className="flex-1 border border-gray-200 rounded-xl py-2.5 text-sm text-gray-500 hover:bg-gray-50">Cancel</button>
               <button onClick={save} className="flex-1 bg-[#7FA68A] text-white rounded-xl py-2.5 text-sm font-medium hover:bg-[#6d9478]">{editId ? 'Save' : 'Add'}</button>
             </div>
           </div>
