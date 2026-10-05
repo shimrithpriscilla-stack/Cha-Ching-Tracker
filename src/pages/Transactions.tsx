@@ -74,14 +74,33 @@ export default function Transactions() {
 
   async function load() {
     const { data: { user } } = await supabase.auth.getUser()
-    const [t, c, m, p, sa] = await Promise.all([
-      supabase.from('transactions').select('*, categories(name), payment_modes(name), platforms(name), source_accounts(id, label, color, account_type)').gte('date', getPeriodStart(period)).order('date', { ascending: false }),
+    const [c, m, p, sa] = await Promise.all([
       supabase.from('categories').select('id, name').order('name'),
       supabase.from('payment_modes').select('id, name').order('name'),
       supabase.from('platforms').select('id, name').order('name'),
       user ? supabase.from('source_accounts').select('id, label, color').eq('user_id', user.id).order('label') : Promise.resolve({ data: [] }),
     ])
-    setTxns(t.data ?? [])
+
+    // Try with source_accounts join; fall back gracefully if column doesn't exist yet
+    let txnData: Transaction[] = []
+    const withJoin = await supabase
+      .from('transactions')
+      .select('*, categories(name), payment_modes(name), platforms(name), source_accounts(id, label, color, account_type)')
+      .gte('date', getPeriodStart(period))
+      .order('date', { ascending: false })
+    if (!withJoin.error) {
+      txnData = withJoin.data ?? []
+    } else {
+      // Column likely not added yet — fetch without the join so existing data stays visible
+      const withoutJoin = await supabase
+        .from('transactions')
+        .select('*, categories(name), payment_modes(name), platforms(name)')
+        .gte('date', getPeriodStart(period))
+        .order('date', { ascending: false })
+      txnData = withoutJoin.data ?? []
+    }
+
+    setTxns(txnData)
     setCategories(c.data ?? [])
     setModes(m.data ?? [])
     setPlatforms(p.data ?? [])
