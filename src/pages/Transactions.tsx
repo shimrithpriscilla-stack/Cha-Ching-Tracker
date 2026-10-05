@@ -333,8 +333,13 @@ export default function Transactions() {
           const subLine = t.merchant?.trim() && t.categories?.name
             ? t.categories.name
             : null
-          // Strip UTR from displayed notes so user only sees their own note
-          const displayNotes = (t.notes ?? '').replace(/UTR:[^\s|]+\s*\|?\s*/g, '').trim().replace(/^\||\|$/g, '').trim()
+          // Extract app source (GPay / PhonePe / Paytm) and strip APP: + UTR: from displayed notes
+          const appMatch = (t.notes ?? '').match(/APP:([^\s|]+)/)
+          const appSource = appMatch?.[1] ?? null
+          const displayNotes = (t.notes ?? '')
+            .replace(/APP:[^\s|]+\s*\|?\s*/g, '')
+            .replace(/UTR:[^\s|]+\s*\|?\s*/g, '')
+            .trim().replace(/^\||\|$/g, '').trim()
 
           return (
             <div key={t.id}
@@ -376,6 +381,12 @@ export default function Transactions() {
                     <span className="text-xs px-2 py-0.5 rounded-full font-medium text-gray-600"
                       style={{ background: t.source_accounts.color ?? '#E5E7EB' }}>
                       {t.source_accounts.label}
+                    </span>
+                  )}
+                  {appSource && (
+                    <span className="text-xs px-2 py-0.5 rounded-full text-gray-500"
+                      style={{ background: appSource === 'GPay' ? '#E8F0FE' : appSource === 'PhonePe' ? '#EDE7F6' : '#E3F2FD' }}>
+                      {appSource}
                     </span>
                   )}
                   {t.payment_modes?.name && <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">{t.payment_modes.name}</span>}

@@ -831,7 +831,7 @@ export default function Import() {
           batch_id: batchId,
           source_account_id: sourceAccountId,
           // Only store user-provided note; UTR stored internally for dedup only
-          notes: [r.note, r.utrNo ? `UTR:${r.utrNo}` : ''].filter(Boolean).join(' | '),
+          notes: [r.note, r.source ? `APP:${r.source}` : '', r.utrNo ? `UTR:${r.utrNo}` : ''].filter(Boolean).join(' | '),
         }
       })
 
