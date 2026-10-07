@@ -39,15 +39,26 @@ type SortDir = 'asc' | 'desc'
 // ── Account detection helpers ─────────────────────────────────────────────────
 
 /**
- * PhonePe / GPay: look for masked account numbers in the full PDF text.
- * PhonePe shows "Debited from XXXXXX1234" where last 4 digits indicate card.
- * GPay shows "SBI" or "Niyo" in the bank label.
- * Fallback: treat the whole text for known keywords.
+ * Normalize a raw account string (from "Debited from X" lines or bank labels)
+ * into a clean account name matching the source_accounts table.
+ */
+function normalizeAccountName(raw: string): string {
+  const s = raw.toLowerCase()
+  if (/niyo|sbm bank|sbm/i.test(s)) return 'Niyo SBM'
+  if (/sbi|state bank/i.test(s)) return 'SBI'
+  if (/myzone/i.test(s)) return 'Axis MyZone'
+  if (/neo/i.test(s)) return 'Axis Neo'
+  if (/axis/i.test(s)) return 'Axis MyZone'
+  // Return the raw trimmed value as fallback so we don't lose info
+  return raw.trim()
+}
+
+/**
+ * Document-level fallback: scan full text for account keywords.
+ * Used only when per-transaction signals are absent.
  */
 function detectPhonePayAccount(fullText: string): string {
-  // Niyo SBM signals
   if (/niyo|SBM|sbm bank/i.test(fullText)) return 'Niyo SBM'
-  // SBI signals
   if (/SBI|State Bank/i.test(fullText)) return 'SBI'
   return ''
 }
@@ -66,7 +77,6 @@ function detectGPayAccount(fullText: string): string {
 function detectPaytmAccount(fullText: string): string {
   if (/myzone/i.test(fullText)) return 'Axis MyZone'
   if (/neo/i.test(fullText)) return 'Axis Neo'
-  // Fallback: Axis card present
   if (/axis/i.test(fullText)) return 'Axis MyZone'
   return ''
 }
@@ -90,13 +100,26 @@ function parsePhonePe(text: string, account: string): Omit<ParsedRow, 'isDuplica
     let j = i + 2
     let utrNo = ''
     let note = ''
+    // Per-transaction account: capture from "Debited from X" / "Credited to X" lines
+    let rowAccount = ''
     while (j < lines.length) {
       if (lines[j].startsWith('Transaction ID')) { j++; continue }
       if (lines[j].startsWith('UTR No')) {
         utrNo = lines[j].replace('UTR No :', '').replace('UTR No:', '').trim()
         j++; continue
       }
-      if (lines[j].startsWith('Debited from') || lines[j].startsWith('Credited to')) { j++; continue }
+      if (lines[j].startsWith('Debited from')) {
+        // e.g. "Debited from XXXXXX1234" or "Debited from SBI Savings Account"
+        const rawAccount = lines[j].replace(/^Debited from\s*/i, '').trim()
+        if (rawAccount) rowAccount = normalizeAccountName(rawAccount)
+        j++; continue
+      }
+      if (lines[j].startsWith('Credited to')) {
+        // Credit transactions: "Credited to XXXXXX1234" — still captures the bank
+        const rawAccount = lines[j].replace(/^Credited to\s*/i, '').trim()
+        if (rawAccount) rowAccount = normalizeAccountName(rawAccount)
+        j++; continue
+      }
       if (lines[j] === 'Credit' || lines[j] === 'Debit') break
       if (lines[j].startsWith('Page ')) break
       if (lines[j].startsWith('This is a system')) break
@@ -136,7 +159,9 @@ function parsePhonePe(text: string, account: string): Omit<ParsedRow, 'isDuplica
       .replace(/^Payment Received\s*/i, 'Received')
       .trim()
 
-    rows.push({ id: utrNo || `pp-${Date.now()}-${rows.length}`, date: dateISO, description: cleanDesc, amount, type, utrNo, note, source: 'PhonePe', account })
+    // Use per-row account if captured, else fall back to document-level account
+    const finalAccount = rowAccount || account
+    rows.push({ id: utrNo || `pp-${Date.now()}-${rows.length}`, date: dateISO, description: cleanDesc, amount, type, utrNo, note, source: 'PhonePe', account: finalAccount })
     i = k
   }
   return rows
@@ -164,11 +189,22 @@ function parseGPay(text: string, account: string): Omit<ParsedRow, 'isDuplicate'
     const upiMatch = upiLine.match(/UPI Transaction ID:\s*(\S+)/)
     const utrNo = upiMatch ? upiMatch[1] : ''
 
+    // GPay statements typically show bank/account name in lines after the UPI Transaction ID
+    // e.g. "SBI Savings Account" or "Niyo SBM" on lines i+4 to i+7 before the ₹ amount line
     let amtStr = ''
+    let rowAccount = ''
     let k = i + 4
-    while (k < lines.length && k < i + 8) {
+    while (k < lines.length && k < i + 10) {
       const l = lines[k]
-      if (l.startsWith('₹')) { amtStr = l.replace('₹', '').replace(/,/g, '').trim(); break }
+      if (l.startsWith('₹')) { amtStr = l.replace('₹', '').replace(/,/g, '').trim(); k++; break }
+      // Detect bank name lines before we hit the amount
+      if (!amtStr && !l.match(/^\d/) && !l.startsWith('UPI') && l.length > 2) {
+        const candidate = normalizeAccountName(l)
+        // Only accept if it matches a known account — avoids picking up merchant names
+        if (['Niyo SBM', 'SBI', 'Axis MyZone', 'Axis Neo'].includes(candidate)) {
+          rowAccount = candidate
+        }
+      }
       k++
     }
     if (!amtStr) { i = k + 1; continue }
@@ -187,8 +223,10 @@ function parseGPay(text: string, account: string): Omit<ParsedRow, 'isDuplicate'
     const dateISO = isNaN(dateObj.getTime()) ? '' : dateObj.toISOString().slice(0, 10)
     if (!dateISO) { i = k + 1; continue }
 
-    rows.push({ id: utrNo || `gp-${Date.now()}-${rows.length}`, date: dateISO, description: cleanDesc, amount, type, utrNo, note: '', source: 'GPay', account })
-    i = k + 1
+    // Use per-row account if captured, else fall back to document-level account
+    const finalAccount = rowAccount || account
+    rows.push({ id: utrNo || `gp-${Date.now()}-${rows.length}`, date: dateISO, description: cleanDesc, amount, type, utrNo, note: '', source: 'GPay', account: finalAccount })
+    i = k
   }
   return rows
 }
@@ -211,6 +249,7 @@ function parsePaytm(text: string, account: string): Omit<ParsedRow, 'isDuplicate
     let note = ''
     let type: 'debit' | 'credit' = 'debit'
     let amtStr = ''
+    let rowAccount = ''
     let j = i + 2
 
     while (j < lines.length) {
@@ -223,6 +262,12 @@ function parsePaytm(text: string, account: string): Omit<ParsedRow, 'isDuplicate
       if (/^notes?:/i.test(l)) { note = l.replace(/^notes?:\s*/i, '').trim(); j++; continue }
       if (l.startsWith('Tag:') || l.startsWith('#')) { j++; continue }
       if (l.startsWith('Axis Bank') || l.startsWith('- Rs.') || l.startsWith('+ Rs.')) {
+        // "Axis Bank - MyZone Credit Card" or "Axis Bank - Neo Credit Card" or "Axis Bank"
+        if (l.startsWith('Axis Bank')) {
+          if (/myzone/i.test(l)) rowAccount = 'Axis MyZone'
+          else if (/neo/i.test(l)) rowAccount = 'Axis Neo'
+          else rowAccount = account // fall back to document-level (which detects MyZone vs Neo)
+        }
         if (l.startsWith('- Rs.')) { type = 'debit'; amtStr = l.replace('- Rs.', '').replace(/,/g, '').trim() }
         if (l.startsWith('+ Rs.')) { type = 'credit'; amtStr = l.replace('+ Rs.', '').replace(/,/g, '').trim() }
         j++
@@ -247,7 +292,9 @@ function parsePaytm(text: string, account: string): Omit<ParsedRow, 'isDuplicate
     const dateISO = dateObj.toISOString().slice(0, 10)
 
     const cleanDesc = desc.replace(/^Paid to\s+/i, '').replace(/^Received from\s+/i, '').trim()
-    rows.push({ id: utrNo, date: dateISO, description: cleanDesc, amount, type, utrNo, note, source: 'Paytm', account })
+    // Use per-row account if captured, else document-level fallback
+    const finalAccount = rowAccount || account
+    rows.push({ id: utrNo, date: dateISO, description: cleanDesc, amount, type, utrNo, note, source: 'Paytm', account: finalAccount })
     i = j
   }
   return rows
