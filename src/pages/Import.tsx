@@ -2,7 +2,7 @@ import * as pdfjsLib from 'pdfjs-dist'
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs`
 
 import { useState, useEffect } from 'react'
-import { Upload, AlertTriangle, CheckCircle, Trash2, RefreshCw, ArrowUpDown, RotateCcw } from 'lucide-react'
+import { Upload, AlertTriangle, CheckCircle, Trash2, RefreshCw, ArrowUpDown, RotateCcw, Pencil, ChevronDown } from 'lucide-react'
 import { supabase } from '../supabase'
 
 interface SoftDupMatch {
@@ -598,6 +598,14 @@ export default function Import() {
   // Hide duplicates toggle — when true, hides all rows marked as hard or soft duplicate
   const [hideDuplicates, setHideDuplicates] = useState(false)
 
+  // Bulk edit state — values to apply to all selected visible rows
+  const [bulkCategory, setBulkCategory] = useState('')
+  const [bulkSpendingType, setBulkSpendingType] = useState('')
+  const [bulkAccount, setBulkAccount] = useState('')
+  const [bulkSource, setBulkSource] = useState('')
+  const [bulkType, setBulkType] = useState('')
+  const [bulkDate, setBulkDate] = useState('')
+
   // Persist parsed rows to localStorage on every change so reload doesn't lose work
   useEffect(() => {
     saveDraft(rows)
@@ -863,6 +871,7 @@ export default function Import() {
     setRows(rows.filter(r => r.id !== id))
   }
 
+
   function deleteSelectedRows() {
     // Delete rows that are visible+selected (respects current filters including hideDuplicates)
     const selectedSet = new Set(
@@ -1027,6 +1036,20 @@ export default function Import() {
 
   const selectedCount = visibleRows.filter(r => r.selected).length
   const dupCount = rows.filter(r => r.isDuplicate).length
+
+  // Apply bulk field to all visible+selected rows (respects current filters)
+  function bulkUpdateSelected(field: string, value: string) {
+    if (!value) return
+    const selectedVisible = new Set(visibleRows.filter(r => r.selected).map(r => r.id))
+    setRows(rows.map(r => {
+      if (!selectedVisible.has(r.id)) return r
+      if (field === 'amount') {
+        const n = parseFloat(value)
+        return { ...r, amount: isNaN(n) ? r.amount : n }
+      }
+      return { ...r, [field]: value }
+    }))
+  }
   const softDupCount = rows.filter(r => r.isSoftDuplicate).length
   const debits = visibleRows.filter(r => r.selected && r.type === 'debit')
   const totalSelected = debits.reduce((s, r) => s + r.amount, 0)
@@ -1231,6 +1254,125 @@ export default function Import() {
               </button>
             </div>
           </div>
+
+          {/* Bulk edit toolbar — shown when rows are selected */}
+          {selectedCount > 0 && (
+            <div className="mb-3 bg-[#2D2D2D] text-white rounded-2xl px-4 py-3 flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-2 text-xs text-gray-300 flex-shrink-0">
+                <Pencil size={13} className="text-[#7FA68A]" />
+                <span className="font-medium text-white">Bulk edit</span>
+                <span className="text-gray-400">({selectedCount} selected)</span>
+              </div>
+              <div className="flex flex-wrap gap-2 items-center">
+
+                {/* Category */}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-gray-400 uppercase tracking-wide">Cat:</span>
+                  <div className="relative flex items-center">
+                    <select
+                      value={bulkCategory}
+                      onChange={e => { setBulkCategory(e.target.value); if (e.target.value) bulkUpdateSelected('category_id', e.target.value) }}
+                      className="text-xs bg-[#3D3D3D] text-white border border-[#555] rounded-lg pl-2 pr-6 py-1 outline-none appearance-none cursor-pointer hover:border-[#7FA68A] focus:border-[#7FA68A] transition-all"
+                    >
+                      <option value="">— pick —</option>
+                      {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                    </select>
+                    <ChevronDown size={10} className="absolute right-1.5 text-gray-400 pointer-events-none" />
+                  </div>
+                </div>
+
+                {/* Spending type */}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-gray-400 uppercase tracking-wide">Type:</span>
+                  <div className="relative flex items-center">
+                    <select
+                      value={bulkSpendingType}
+                      onChange={e => { setBulkSpendingType(e.target.value); if (e.target.value) bulkUpdateSelected('spending_type', e.target.value) }}
+                      className="text-xs bg-[#3D3D3D] text-white border border-[#555] rounded-lg pl-2 pr-6 py-1 outline-none appearance-none cursor-pointer hover:border-[#7FA68A] focus:border-[#7FA68A] transition-all"
+                    >
+                      <option value="">— pick —</option>
+                      <option value="necessary">Necessary</option>
+                      <option value="unnecessary">Unnecessary</option>
+                      <option value="credit">Credit</option>
+                    </select>
+                    <ChevronDown size={10} className="absolute right-1.5 text-gray-400 pointer-events-none" />
+                  </div>
+                </div>
+
+                {/* Source / App */}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-gray-400 uppercase tracking-wide">App:</span>
+                  <div className="relative flex items-center">
+                    <select
+                      value={bulkSource}
+                      onChange={e => { setBulkSource(e.target.value); if (e.target.value) bulkUpdateSelected('source', e.target.value) }}
+                      className="text-xs bg-[#3D3D3D] text-white border border-[#555] rounded-lg pl-2 pr-6 py-1 outline-none appearance-none cursor-pointer hover:border-[#7FA68A] focus:border-[#7FA68A] transition-all"
+                    >
+                      <option value="">— pick —</option>
+                      {['GPay', 'PhonePe', 'Paytm'].map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                    <ChevronDown size={10} className="absolute right-1.5 text-gray-400 pointer-events-none" />
+                  </div>
+                </div>
+
+                {/* Account / Bank */}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-gray-400 uppercase tracking-wide">Account:</span>
+                  <div className="relative flex items-center">
+                    <select
+                      value={bulkAccount}
+                      onChange={e => { setBulkAccount(e.target.value); if (e.target.value) bulkUpdateSelected('account', e.target.value) }}
+                      className="text-xs bg-[#3D3D3D] text-white border border-[#555] rounded-lg pl-2 pr-6 py-1 outline-none appearance-none cursor-pointer hover:border-[#7FA68A] focus:border-[#7FA68A] transition-all"
+                    >
+                      <option value="">— pick —</option>
+                      {/* Known accounts + any in current batch */}
+                      {['SBI', 'Niyo SBM', 'Axis MyZone', 'Axis Neo', ...allAccounts.filter(a => !['SBI','Niyo SBM','Axis MyZone','Axis Neo'].includes(a))].map(a => (
+                        <option key={a} value={a}>{a}</option>
+                      ))}
+                    </select>
+                    <ChevronDown size={10} className="absolute right-1.5 text-gray-400 pointer-events-none" />
+                  </div>
+                </div>
+
+                {/* Debit / Credit */}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-gray-400 uppercase tracking-wide">Dr/Cr:</span>
+                  <div className="relative flex items-center">
+                    <select
+                      value={bulkType}
+                      onChange={e => { setBulkType(e.target.value); if (e.target.value) bulkUpdateSelected('type', e.target.value) }}
+                      className="text-xs bg-[#3D3D3D] text-white border border-[#555] rounded-lg pl-2 pr-6 py-1 outline-none appearance-none cursor-pointer hover:border-[#7FA68A] focus:border-[#7FA68A] transition-all"
+                    >
+                      <option value="">— pick —</option>
+                      <option value="debit">Debit</option>
+                      <option value="credit">Credit</option>
+                    </select>
+                    <ChevronDown size={10} className="absolute right-1.5 text-gray-400 pointer-events-none" />
+                  </div>
+                </div>
+
+                {/* Date override */}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-gray-400 uppercase tracking-wide">Date:</span>
+                  <input
+                    type="date"
+                    value={bulkDate}
+                    onChange={e => { setBulkDate(e.target.value); if (e.target.value) bulkUpdateSelected('date', e.target.value) }}
+                    className="text-xs bg-[#3D3D3D] text-white border border-[#555] rounded-lg px-2 py-1 outline-none cursor-pointer hover:border-[#7FA68A] focus:border-[#7FA68A] transition-all"
+                  />
+                </div>
+
+              </div>
+
+              {/* Reset bulk selectors */}
+              <button
+                onClick={() => { setBulkCategory(''); setBulkSpendingType(''); setBulkAccount(''); setBulkSource(''); setBulkType(''); setBulkDate('') }}
+                className="ml-auto text-[10px] text-gray-500 hover:text-gray-300 underline flex-shrink-0 transition-all"
+              >
+                Reset selectors
+              </button>
+            </div>
+          )}
 
           {/* Filter chips */}
           <div className="flex gap-4 mb-3 flex-wrap items-center bg-[#F5F2EC] rounded-2xl px-4 py-2.5">
