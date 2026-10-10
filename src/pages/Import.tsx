@@ -81,6 +81,22 @@ function detectPaytmAccount(fullText: string): string {
   return ''
 }
 
+// ── Date helpers ─────────────────────────────────────────────────────────────
+/**
+ * Parse a date string and return a YYYY-MM-DD string using LOCAL date components.
+ * Using new Date(str).toISOString() would give UTC midnight, which shifts the
+ * date backward by one day in IST (UTC+5:30) — e.g. "Oct 1, 2026" → "Sep 30".
+ * This function always uses the local year/month/day, so the date is stable.
+ */
+function parseLocalDate(str: string): string {
+  const d = new Date(str)
+  if (isNaN(d.getTime())) return ''
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
 // ── Parsers ──────────────────────────────────────────────────────────────────
 
 function parsePhonePe(text: string, account: string): Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] {
@@ -149,8 +165,7 @@ function parsePhonePe(text: string, account: string): Omit<ParsedRow, 'isDuplica
     const amount = parseFloat(amtStr.replace(/,/g, ''))
     if (isNaN(amount) || amount <= 0) { i = k; continue }
 
-    const dateObj = new Date(dateLine)
-    const dateISO = isNaN(dateObj.getTime()) ? '' : dateObj.toISOString().slice(0, 10)
+    const dateISO = parseLocalDate(dateLine)
     if (!dateISO) { i = k; continue }
 
     const cleanDesc = desc
@@ -219,8 +234,7 @@ function parseGPay(text: string, account: string): Omit<ParsedRow, 'isDuplicate'
       .trim()
 
     const dateStr = `${dateMatch[1]} ${dateMatch[2]} ${dateMatch[3]}`
-    const dateObj = new Date(dateStr)
-    const dateISO = isNaN(dateObj.getTime()) ? '' : dateObj.toISOString().slice(0, 10)
+    const dateISO = parseLocalDate(dateStr)
     if (!dateISO) { i = k + 1; continue }
 
     // Use per-row account if captured, else fall back to document-level account
@@ -289,7 +303,12 @@ function parsePaytm(text: string, account: string): Omit<ParsedRow, 'isDuplicate
     const day = parseInt(dateMatch[1])
     const dateObj = new Date(currentYear, monthNum, day)
     if (dateObj > new Date()) dateObj.setFullYear(currentYear - 1)
-    const dateISO = dateObj.toISOString().slice(0, 10)
+    // Use local date components directly — toISOString() would give UTC midnight
+    // which shifts the date back by one day in IST (UTC+5:30)
+    const y = dateObj.getFullYear()
+    const mo = String(dateObj.getMonth() + 1).padStart(2, '0')
+    const d = String(dateObj.getDate()).padStart(2, '0')
+    const dateISO = `${y}-${mo}-${d}`
 
     const cleanDesc = desc.replace(/^Paid to\s+/i, '').replace(/^Received from\s+/i, '').trim()
     // Use per-row account if captured, else document-level fallback
