@@ -1,7 +1,7 @@
 import * as pdfjsLib from 'pdfjs-dist'
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs`
 
-import { useState, useEffect } from 'react'
+import React, { useState, useEffect } from 'react'
 import { Upload, AlertTriangle, CheckCircle, Trash2, RefreshCw, ArrowUpDown, RotateCcw, Pencil, ChevronDown } from 'lucide-react'
 import { supabase } from '../supabase'
 
@@ -554,6 +554,45 @@ interface ImportBatch {
 
 const BATCH_HISTORY_KEY = 'import_batch_history'
 const IMPORT_DRAFT_KEY = 'cc_import_draft'
+const COL_WIDTHS_KEY = 'cc_import_col_widths'
+
+interface ColWidths {
+  checkbox: number
+  date: number
+  description: number
+  notes: number
+  amount: number
+  category: number
+  type: number
+  account: number
+  status: number
+  del: number
+}
+
+const DEFAULT_COL_WIDTHS: ColWidths = {
+  checkbox: 36,
+  date: 120,
+  description: 240,
+  notes: 160,
+  amount: 110,
+  category: 170,
+  type: 130,
+  account: 130,
+  status: 100,
+  del: 36,
+}
+
+function loadColWidths(): ColWidths {
+  try {
+    const raw = localStorage.getItem(COL_WIDTHS_KEY)
+    if (!raw) return DEFAULT_COL_WIDTHS
+    return { ...DEFAULT_COL_WIDTHS, ...JSON.parse(raw) }
+  } catch { return DEFAULT_COL_WIDTHS }
+}
+
+function saveColWidths(w: ColWidths) {
+  try { localStorage.setItem(COL_WIDTHS_KEY, JSON.stringify(w)) } catch {}
+}
 
 function loadDraft(): ParsedRow[] {
   try {
@@ -591,6 +630,45 @@ function saveBatchHistory(batches: ImportBatch[]) {
   try { localStorage.setItem(BATCH_HISTORY_KEY, JSON.stringify(batches.slice(0, 20))) } catch {}
 }
 
+// ── Resizable column handle ──────────────────────────────────────────────────
+interface ResizeHandleProps {
+  currentWidth: number
+  onWidthChange: (newWidth: number) => void
+}
+function ResizeHandle({ currentWidth, onWidthChange }: ResizeHandleProps) {
+  function handleMouseDown(e: React.MouseEvent) {
+    e.preventDefault()
+    const startX = e.clientX
+    const startWidth = currentWidth
+    function onMove(ev: MouseEvent) {
+      const newWidth = Math.max(36, startWidth + (ev.clientX - startX))
+      onWidthChange(newWidth)
+    }
+    function onUp() {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
+  return (
+    <div
+      onMouseDown={handleMouseDown}
+      style={{
+        position: 'absolute',
+        right: 0,
+        top: 0,
+        bottom: 0,
+        width: 5,
+        cursor: 'col-resize',
+        userSelect: 'none',
+        zIndex: 1,
+      }}
+      className="hover:bg-[#7FA68A]/40 active:bg-[#7FA68A]/60 transition-colors"
+    />
+  )
+}
+
 export default function Import() {
   const [rows, setRows] = useState<ParsedRow[]>(() => loadDraft())
   const [categories, setCategories] = useState<Category[]>([])
@@ -624,6 +702,17 @@ export default function Import() {
   const [bulkSource, setBulkSource] = useState('')
   const [bulkType, setBulkType] = useState('')
   const [bulkDate, setBulkDate] = useState('')
+
+  // Column widths — persisted to localStorage
+  const [colWidths, setColWidths] = useState<ColWidths>(() => loadColWidths())
+
+  function updateColWidth(col: keyof ColWidths, width: number) {
+    setColWidths(prev => {
+      const next = { ...prev, [col]: Math.max(36, width) }
+      saveColWidths(next)
+      return next
+    })
+  }
 
   // Persist parsed rows to localStorage on every change so reload doesn't lose work
   useEffect(() => {
@@ -1446,23 +1535,59 @@ export default function Import() {
 
           <div className="bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden">
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+              <table className="w-full text-sm table-fixed">
+                <colgroup>
+                  <col style={{ width: colWidths.checkbox }} />
+                  <col style={{ width: colWidths.date }} />
+                  <col style={{ width: colWidths.description }} />
+                  <col style={{ width: colWidths.notes }} />
+                  <col style={{ width: colWidths.amount }} />
+                  <col style={{ width: colWidths.category }} />
+                  <col style={{ width: colWidths.type }} />
+                  <col style={{ width: colWidths.account }} />
+                  <col style={{ width: colWidths.status }} />
+                  <col style={{ width: colWidths.del }} />
+                </colgroup>
                 <thead>
                   <tr className="bg-[#F5F2EC] text-xs text-gray-500 uppercase tracking-wide">
-                    <th className="px-3 py-3 text-left w-8">
+                    <th className="px-3 py-3 text-left relative overflow-hidden" style={{ width: colWidths.checkbox }}>
                       <input type="checkbox" onChange={toggleAll}
                         checked={visibleRows.filter(r => !r.isDuplicate).length > 0 && visibleRows.filter(r => !r.isDuplicate).every(r => r.selected)}
                         className="rounded" />
                     </th>
-                    <th className="px-3 py-3 text-left"><SortBtn field="date" label="Date" /></th>
-                    <th className="px-3 py-3 text-left">Description</th>
-                    <th className="px-3 py-3 text-left">Notes</th>
-                    <th className="px-3 py-3 text-left"><SortBtn field="amount" label="Amount" /></th>
-                    <th className="px-3 py-3 text-left">Category</th>
-                    <th className="px-3 py-3 text-left">Type</th>
-                    <th className="px-3 py-3 text-left">Account</th>
-                    <th className="px-3 py-3 text-left">Status</th>
-                    <th className="px-3 py-3 text-left w-8"></th>
+                    <th className="px-3 py-3 text-left relative overflow-hidden" style={{ width: colWidths.date }}>
+                      <SortBtn field="date" label="Date" />
+                      <ResizeHandle currentWidth={colWidths.date} onWidthChange={w => updateColWidth('date', w)} />
+                    </th>
+                    <th className="px-3 py-3 text-left relative overflow-hidden" style={{ width: colWidths.description }}>
+                      Description
+                      <ResizeHandle currentWidth={colWidths.description} onWidthChange={w => updateColWidth('description', w)} />
+                    </th>
+                    <th className="px-3 py-3 text-left relative overflow-hidden" style={{ width: colWidths.notes }}>
+                      Notes
+                      <ResizeHandle currentWidth={colWidths.notes} onWidthChange={w => updateColWidth('notes', w)} />
+                    </th>
+                    <th className="px-3 py-3 text-left relative overflow-hidden" style={{ width: colWidths.amount }}>
+                      <SortBtn field="amount" label="Amount" />
+                      <ResizeHandle currentWidth={colWidths.amount} onWidthChange={w => updateColWidth('amount', w)} />
+                    </th>
+                    <th className="px-3 py-3 text-left relative overflow-hidden" style={{ width: colWidths.category }}>
+                      Category
+                      <ResizeHandle currentWidth={colWidths.category} onWidthChange={w => updateColWidth('category', w)} />
+                    </th>
+                    <th className="px-3 py-3 text-left relative overflow-hidden" style={{ width: colWidths.type }}>
+                      Type
+                      <ResizeHandle currentWidth={colWidths.type} onWidthChange={w => updateColWidth('type', w)} />
+                    </th>
+                    <th className="px-3 py-3 text-left relative overflow-hidden" style={{ width: colWidths.account }}>
+                      Account
+                      <ResizeHandle currentWidth={colWidths.account} onWidthChange={w => updateColWidth('account', w)} />
+                    </th>
+                    <th className="px-3 py-3 text-left relative overflow-hidden" style={{ width: colWidths.status }}>
+                      Status
+                      <ResizeHandle currentWidth={colWidths.status} onWidthChange={w => updateColWidth('status', w)} />
+                    </th>
+                    <th className="px-3 py-3 text-left relative overflow-hidden" style={{ width: colWidths.del }}></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1480,12 +1605,12 @@ export default function Import() {
                           value={row.date}
                           onChange={e => updateRow(row.id, 'date', e.target.value)} />
                       </td>
-                      <td className="px-3 py-2.5 max-w-48">
+                      <td className="px-3 py-2.5 overflow-hidden">
                         <input className="w-full text-gray-800 bg-transparent outline-none focus:bg-gray-50 rounded px-1 truncate"
                           value={row.description}
                           onChange={e => updateRow(row.id, 'description', e.target.value)} />
                       </td>
-                      <td className="px-3 py-2.5 max-w-40">
+                      <td className="px-3 py-2.5 overflow-hidden">
                         <input className={`w-full text-xs rounded px-1 truncate outline-none placeholder:text-gray-300
                           ${row.note
                             ? 'text-gray-700 bg-[#F5F2EC] focus:bg-[#EDE9E0]'
@@ -1495,11 +1620,11 @@ export default function Import() {
                           value={row.note}
                           onChange={e => updateRow(row.id, 'note', e.target.value)} />
                       </td>
-                      <td className="px-3 py-2.5 whitespace-nowrap">
+                      <td className="px-3 py-2.5 whitespace-nowrap overflow-hidden">
                         <div className="flex items-center gap-1">
                           <span className={row.type === 'credit' ? 'text-[#7FA68A] font-medium' : 'text-gray-800'}>{row.type === 'credit' ? '+' : '−'}</span>
                           <input type="number" min="0" step="0.01"
-                            className={`w-20 text-sm bg-transparent border-b border-transparent hover:border-gray-200 focus:border-[#7FA68A] outline-none ${row.type === 'credit' ? 'text-[#7FA68A] font-medium' : 'text-gray-800'}`}
+                            className={`w-full text-sm bg-transparent border-b border-transparent hover:border-gray-200 focus:border-[#7FA68A] outline-none ${row.type === 'credit' ? 'text-[#7FA68A] font-medium' : 'text-gray-800'}`}
                             value={row.amount}
                             onChange={e => updateRow(row.id, 'amount', e.target.value)} />
                         </div>
