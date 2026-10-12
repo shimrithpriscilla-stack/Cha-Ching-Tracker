@@ -4,6 +4,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs
 import React, { useState, useEffect } from 'react'
 import { Upload, AlertTriangle, CheckCircle, Trash2, RefreshCw, ArrowUpDown, RotateCcw, Pencil, ChevronDown } from 'lucide-react'
 import { supabase } from '../supabase'
+import type { SourceAccount } from './Settings'
 
 interface SoftDupMatch {
   date: string
@@ -21,7 +22,7 @@ interface ParsedRow {
   utrNo: string
   note: string
   source: string
-  account: string          // e.g. "SBI", "Niyo SBM", "Axis MyZone", "Axis Neo"
+  account: string          // label from source_accounts table (e.g. "SBI Savings", "Niyo SBM", "Axis MyZone CC")
   isDuplicate: boolean
   isSoftDuplicate: boolean
   softDupMatch: SoftDupMatch | null
@@ -40,15 +41,21 @@ type SortDir = 'asc' | 'desc'
 
 /**
  * Normalize a raw account string (from "Debited from X" lines or bank labels)
- * into a clean account name matching the source_accounts table.
+ * into a clean account label matching the source_accounts table.
+ * Tries each account's bank_name against the raw string.
+ * Falls back to the raw trimmed value if no match found.
  */
-function normalizeAccountName(raw: string): string {
+function normalizeAccountName(raw: string, accounts: SourceAccount[]): string {
   const s = raw.toLowerCase()
-  if (/niyo|sbm bank|sbm/i.test(s)) return 'Niyo SBM'
-  if (/sbi|state bank/i.test(s)) return 'SBI'
-  if (/myzone/i.test(s)) return 'Axis MyZone'
-  if (/neo/i.test(s)) return 'Axis Neo'
-  if (/axis/i.test(s)) return 'Axis MyZone'
+  // Try to match against each account's bank_name (longer names first to be more specific)
+  const sorted = [...accounts].sort((a, b) => b.bank_name.length - a.bank_name.length)
+  for (const acc of sorted) {
+    if (s.includes(acc.bank_name.toLowerCase())) return acc.label
+  }
+  // Also check last4 if present in raw string
+  for (const acc of sorted) {
+    if (acc.last4 && raw.includes(acc.last4)) return acc.label
+  }
   // Return the raw trimmed value as fallback so we don't lose info
   return raw.trim()
 }
@@ -57,27 +64,41 @@ function normalizeAccountName(raw: string): string {
  * Document-level fallback: scan full text for account keywords.
  * Used only when per-transaction signals are absent.
  */
-function detectPhonePayAccount(fullText: string): string {
-  if (/niyo|SBM|sbm bank/i.test(fullText)) return 'Niyo SBM'
-  if (/SBI|State Bank/i.test(fullText)) return 'SBI'
+function detectPhonePayAccount(fullText: string, accounts: SourceAccount[]): string {
+  const sorted = [...accounts].sort((a, b) => b.bank_name.length - a.bank_name.length)
+  for (const acc of sorted) {
+    if (new RegExp(acc.bank_name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(fullText)) return acc.label
+  }
   return ''
 }
 
-function detectGPayAccount(fullText: string): string {
-  if (/niyo|SBM|sbm bank/i.test(fullText)) return 'Niyo SBM'
-  if (/SBI|State Bank/i.test(fullText)) return 'SBI'
+function detectGPayAccount(fullText: string, accounts: SourceAccount[]): string {
+  const sorted = [...accounts].sort((a, b) => b.bank_name.length - a.bank_name.length)
+  for (const acc of sorted) {
+    if (new RegExp(acc.bank_name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(fullText)) return acc.label
+  }
   return ''
 }
 
 /**
- * Paytm: detect Axis MyZone vs Axis Neo from card number hints or card label.
- * Paytm statements often say "AXIS BANK - ...MyZone" or show last 4 digits
- * that differ between the two cards. We look for card-name keywords.
+ * Paytm: detect account from card number hints or card label in full text.
+ * Paytm statements often say "AXIS BANK - ...MyZone" or show last 4 digits.
  */
-function detectPaytmAccount(fullText: string): string {
-  if (/myzone/i.test(fullText)) return 'Axis MyZone'
-  if (/neo/i.test(fullText)) return 'Axis Neo'
-  if (/axis/i.test(fullText)) return 'Axis MyZone'
+function detectPaytmAccount(fullText: string, accounts: SourceAccount[]): string {
+  // Sort credit cards first (more specific), then by bank_name length descending
+  const sorted = [...accounts].sort((a, b) => {
+    if (a.account_type === 'credit' && b.account_type !== 'credit') return -1
+    if (b.account_type === 'credit' && a.account_type !== 'credit') return 1
+    return b.bank_name.length - a.bank_name.length
+  })
+  for (const acc of sorted) {
+    // Check label keywords (e.g. "MyZone", "Neo") then bank_name
+    const labelWords = acc.label.split(/\s+/)
+    for (const word of labelWords) {
+      if (word.length >= 3 && new RegExp(word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(fullText)) return acc.label
+    }
+    if (new RegExp(acc.bank_name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(fullText)) return acc.label
+  }
   return ''
 }
 
@@ -99,7 +120,7 @@ function parseLocalDate(str: string): string {
 
 // ── Parsers ──────────────────────────────────────────────────────────────────
 
-function parsePhonePe(text: string, account: string): Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] {
+function parsePhonePe(text: string, account: string, accounts: SourceAccount[]): Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] {
   const rows: Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] = []
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
 
@@ -127,13 +148,13 @@ function parsePhonePe(text: string, account: string): Omit<ParsedRow, 'isDuplica
       if (lines[j].startsWith('Debited from')) {
         // e.g. "Debited from XXXXXX1234" or "Debited from SBI Savings Account"
         const rawAccount = lines[j].replace(/^Debited from\s*/i, '').trim()
-        if (rawAccount) rowAccount = normalizeAccountName(rawAccount)
+        if (rawAccount) rowAccount = normalizeAccountName(rawAccount, accounts)
         j++; continue
       }
       if (lines[j].startsWith('Credited to')) {
         // Credit transactions: "Credited to XXXXXX1234" — still captures the bank
         const rawAccount = lines[j].replace(/^Credited to\s*/i, '').trim()
-        if (rawAccount) rowAccount = normalizeAccountName(rawAccount)
+        if (rawAccount) rowAccount = normalizeAccountName(rawAccount, accounts)
         j++; continue
       }
       if (lines[j] === 'Credit' || lines[j] === 'Debit') break
@@ -182,7 +203,7 @@ function parsePhonePe(text: string, account: string): Omit<ParsedRow, 'isDuplica
   return rows
 }
 
-function parseGPay(text: string, account: string): Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] {
+function parseGPay(text: string, account: string, accounts: SourceAccount[]): Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] {
   const rows: Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] = []
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
 
@@ -214,9 +235,9 @@ function parseGPay(text: string, account: string): Omit<ParsedRow, 'isDuplicate'
       if (l.startsWith('₹')) { amtStr = l.replace('₹', '').replace(/,/g, '').trim(); k++; break }
       // Detect bank name lines before we hit the amount
       if (!amtStr && !l.match(/^\d/) && !l.startsWith('UPI') && l.length > 2) {
-        const candidate = normalizeAccountName(l)
-        // Only accept if it matches a known account — avoids picking up merchant names
-        if (['Niyo SBM', 'SBI', 'Axis MyZone', 'Axis Neo'].includes(candidate)) {
+        const candidate = normalizeAccountName(l, accounts)
+        // Only accept if it matches a known account label — avoids picking up merchant names
+        if (accounts.some(a => a.label === candidate)) {
           rowAccount = candidate
         }
       }
@@ -245,7 +266,7 @@ function parseGPay(text: string, account: string): Omit<ParsedRow, 'isDuplicate'
   return rows
 }
 
-function parsePaytm(text: string, account: string): Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] {
+function parsePaytm(text: string, account: string, accounts: SourceAccount[]): Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] {
   const rows: Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] = []
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
 
@@ -278,9 +299,8 @@ function parsePaytm(text: string, account: string): Omit<ParsedRow, 'isDuplicate
       if (l.startsWith('Axis Bank') || l.startsWith('- Rs.') || l.startsWith('+ Rs.')) {
         // "Axis Bank - MyZone Credit Card" or "Axis Bank - Neo Credit Card" or "Axis Bank"
         if (l.startsWith('Axis Bank')) {
-          if (/myzone/i.test(l)) rowAccount = 'Axis MyZone'
-          else if (/neo/i.test(l)) rowAccount = 'Axis Neo'
-          else rowAccount = account // fall back to document-level (which detects MyZone vs Neo)
+          const matched = normalizeAccountName(l, accounts)
+          rowAccount = accounts.some(a => a.label === matched) ? matched : account
         }
         if (l.startsWith('- Rs.')) { type = 'debit'; amtStr = l.replace('- Rs.', '').replace(/,/g, '').trim() }
         if (l.startsWith('+ Rs.')) { type = 'credit'; amtStr = l.replace('+ Rs.', '').replace(/,/g, '').trim() }
@@ -319,7 +339,7 @@ function parsePaytm(text: string, account: string): Omit<ParsedRow, 'isDuplicate
   return rows
 }
 
-function parsePhonePeCSV(text: string): Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] {
+function parsePhonePeCSV(text: string, accounts: SourceAccount[]): Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] {
   const rows: Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] = []
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
 
@@ -327,8 +347,8 @@ function parsePhonePeCSV(text: string): Omit<ParsedRow, 'isDuplicate' | 'isSoftD
   const headerIdx = lines.findIndex(l => l.startsWith('Date,') && l.includes('Transaction Details'))
   if (headerIdx === -1) return rows
 
-  // Detect account from phone number line at top (PhonePe CSV has no card info, just SBI/Niyo clues)
-  const account = detectPhonePayAccount(lines.slice(0, headerIdx).join(' '))
+  // Detect account from header lines at top (PhonePe CSV has no per-transaction card info)
+  const account = detectPhonePayAccount(lines.slice(0, headerIdx).join(' '), accounts)
 
   for (let i = headerIdx + 1; i < lines.length; i++) {
     const line = lines[i]
@@ -371,23 +391,23 @@ function parsePhonePeCSV(text: string): Omit<ParsedRow, 'isDuplicate' | 'isSoftD
   return rows
 }
 
-function detectAndParse(text: string): Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] {
+function detectAndParse(text: string, accounts: SourceAccount[]): Omit<ParsedRow, 'isDuplicate' | 'isSoftDuplicate' | 'softDupMatch' | 'category_id' | 'spending_type' | 'selected'>[] {
   if (text.includes('Paytm Statement') || text.includes('Passbook Payments History')) {
-    return parsePaytm(text, detectPaytmAccount(text))
+    return parsePaytm(text, detectPaytmAccount(text, accounts), accounts)
   }
   // PhonePe CSV — has a header row starting with "Date,Time,Transaction Details"
   if (text.includes('Transaction Details') && text.includes('Transaction Type')) {
-    return parsePhonePeCSV(text)
+    return parsePhonePeCSV(text, accounts)
   }
   if (text.includes('PhonePe') || text.includes('UTR No')) {
-    return parsePhonePe(text, detectPhonePayAccount(text))
+    return parsePhonePe(text, detectPhonePayAccount(text, accounts), accounts)
   }
   if (text.includes('Google Pay') || text.includes('UPI Transaction ID')) {
-    return parseGPay(text, detectGPayAccount(text))
+    return parseGPay(text, detectGPayAccount(text, accounts), accounts)
   }
-  const pp = parsePhonePe(text, detectPhonePayAccount(text))
+  const pp = parsePhonePe(text, detectPhonePayAccount(text, accounts), accounts)
   if (pp.length > 0) return pp
-  return parseGPay(text, detectGPayAccount(text))
+  return parseGPay(text, detectGPayAccount(text, accounts), accounts)
 }
 
 // ── Auto-categorisation rules ─────────────────────────────────────────────────
@@ -675,6 +695,7 @@ export default function Import() {
   const [rows, setRows] = useState<ParsedRow[]>(() => loadDraft())
   const [categories, setCategories] = useState<Category[]>([])
   const [paymentModes, setPaymentModes] = useState<PaymentMode[]>([])
+  const [sourceAccounts, setSourceAccounts] = useState<SourceAccount[]>([])
   const [dragging, setDragging] = useState(false)
   const [loading, setLoading] = useState(false)
   const [loadingMsg, setLoadingMsg] = useState('Reading your statement…')
@@ -720,6 +741,19 @@ export default function Import() {
   useEffect(() => {
     saveDraft(rows)
   }, [rows])
+
+  // Load source accounts from DB on mount (always — used for account detection + dropdowns)
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      if (!user) return
+      supabase
+        .from('source_accounts')
+        .select('id, last4, bank_name, label, account_type, color')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: true })
+        .then(({ data }) => { if (data) setSourceAccounts(data) })
+    })
+  }, [])
 
   // Load categories from DB if rows were restored from draft (so dropdowns work)
   useEffect(() => {
@@ -819,7 +853,7 @@ export default function Import() {
     }
 
     setLoadingMsg('Parsing transactions…')
-    const parsed = detectAndParse(text)
+    const parsed = detectAndParse(text, sourceAccounts)
 
     if (parsed.length === 0) {
       const detected = text.includes('PhonePe') ? 'PhonePe' : text.includes('Google Pay') ? 'GPay' : text.includes('Paytm') ? 'Paytm' : 'Unknown'
@@ -1435,8 +1469,9 @@ export default function Import() {
                       className="text-xs bg-[#3D3D3D] text-white border border-[#555] rounded-lg pl-2 pr-6 py-1 outline-none appearance-none cursor-pointer hover:border-[#7FA68A] focus:border-[#7FA68A] transition-all"
                     >
                       <option value="">— pick —</option>
-                      {/* Known accounts + any in current batch */}
-                      {['SBI', 'Niyo SBM', 'Axis MyZone', 'Axis Neo', ...allAccounts.filter(a => !['SBI','Niyo SBM','Axis MyZone','Axis Neo'].includes(a))].map(a => (
+                      {/* DB accounts first, then any unrecognised accounts from current batch */}
+                      {sourceAccounts.map(a => <option key={a.id} value={a.label}>{a.label}</option>)}
+                      {allAccounts.filter(a => !sourceAccounts.some(sa => sa.label === a)).map(a => (
                         <option key={a} value={a}>{a}</option>
                       ))}
                     </select>
@@ -1671,7 +1706,9 @@ export default function Import() {
                           onChange={e => updateRow(row.id, 'account', e.target.value)}
                         >
                           <option value="">— none —</option>
-                          {['SBI', 'Niyo SBM', 'Axis MyZone', 'Axis Neo', ...allAccounts.filter(a => !['SBI','Niyo SBM','Axis MyZone','Axis Neo'].includes(a))].map(a => (
+                          {/* DB accounts first, then any unrecognised labels from the current batch */}
+                          {sourceAccounts.map(a => <option key={a.id} value={a.label}>{a.label}</option>)}
+                          {allAccounts.filter(a => !sourceAccounts.some(sa => sa.label === a)).map(a => (
                             <option key={a} value={a}>{a}</option>
                           ))}
                         </select>
