@@ -1,8 +1,8 @@
 import * as pdfjsLib from 'pdfjs-dist'
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs`
 
-import React, { useState, useEffect } from 'react'
-import { Upload, AlertTriangle, CheckCircle, Trash2, RefreshCw, ArrowUpDown, RotateCcw, Pencil, ChevronDown } from 'lucide-react'
+import React, { useState, useEffect, useRef } from 'react'
+import { Upload, AlertTriangle, CheckCircle, Trash2, RefreshCw, ArrowUpDown, RotateCcw, Pencil, ChevronDown, Filter } from 'lucide-react'
 import { supabase } from '../supabase'
 import type { SourceAccount } from './Settings'
 
@@ -711,10 +711,10 @@ export default function Import() {
   const [sortField, setSortField] = useState<SortField>('date')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
 
-  // Filter state (multi-select via Set)
-  const [filterSources, setFilterSources] = useState<Set<string>>(new Set())
-  const [filterAccounts, setFilterAccounts] = useState<Set<string>>(new Set())
-  const [filterTypes, setFilterTypes] = useState<Set<string>>(new Set())
+  // Excel-style column filters: Map<colKey, Set<value>> where '__blank__' = empty cell
+  const [columnFilters, setColumnFilters] = useState<Map<string, Set<string>>>(new Map())
+  // Which column header filter dropdown is open (null = none)
+  const [openFilterCol, setOpenFilterCol] = useState<string | null>(null)
   // Hide duplicates toggle — when true, hides all rows marked as hard or soft duplicate
   const [hideDuplicates, setHideDuplicates] = useState(false)
 
@@ -776,11 +776,35 @@ export default function Import() {
     }
   }
 
-  function toggleFilter(set: Set<string>, setter: (s: Set<string>) => void, val: string) {
-    const next = new Set(set)
-    if (next.has(val)) next.delete(val)
-    else next.add(val)
-    setter(next)
+  // ── Column filter helpers ──────────────────────────────────────────────────────
+
+  /** Toggle a single value in a column's filter set. Clears the whole column filter if result is empty. */
+  function toggleColFilter(colKey: string, value: string) {
+    setColumnFilters(prev => {
+      const next = new Map(prev)
+      const existing = new Set(next.get(colKey) ?? [])
+      if (existing.has(value)) existing.delete(value)
+      else existing.add(value)
+      if (existing.size === 0) next.delete(colKey)
+      else next.set(colKey, existing)
+      return next
+    })
+  }
+
+  /** Set a column's filter to exactly this set of values (use to "Select All" / clear). */
+  function setColFilter(colKey: string, values: Set<string>) {
+    setColumnFilters(prev => {
+      const next = new Map(prev)
+      if (values.size === 0) next.delete(colKey)
+      else next.set(colKey, values)
+      return next
+    })
+  }
+
+  /** Clear all column filters. */
+  function clearAllFilters() {
+    setColumnFilters(new Map())
+    setHideDuplicates(false)
   }
 
   async function refreshCategories() {
@@ -796,9 +820,7 @@ export default function Import() {
     setCommitted(0)
     setLoadingMsg('Reading your statement…')
     // Reset filters on new file
-    setFilterSources(new Set())
-    setFilterAccounts(new Set())
-    setFilterTypes(new Set())
+    setColumnFilters(new Map())
     setHideDuplicates(false)
 
     let text = ''
@@ -1018,18 +1040,7 @@ export default function Import() {
 
   function deleteSelectedRows() {
     // Delete rows that are visible+selected (respects current filters including hideDuplicates)
-    const selectedSet = new Set(
-      rows
-        .filter(r => {
-          if (!r.selected) return false
-          if (hideDuplicates && (r.isDuplicate || r.isSoftDuplicate)) return false
-          if (filterSources.size > 0 && !filterSources.has(r.source)) return false
-          if (filterAccounts.size > 0 && !filterAccounts.has(r.account)) return false
-          if (filterTypes.size > 0 && !filterTypes.has(r.type)) return false
-          return true
-        })
-        .map(r => r.id)
-    )
+    const selectedSet = new Set(visibleRows.filter(r => r.selected).map(r => r.id))
     setRows(rows.filter(r => !selectedSet.has(r.id)))
   }
 
@@ -1154,16 +1165,47 @@ export default function Import() {
 
   // ── Derived: filtered + sorted rows ──────────────────────────────────────────
 
-  const allSources = [...new Set(rows.map(r => r.source).filter(Boolean))].sort()
+  // ── Derived: unique values per filterable column ─────────────────────────────
   const allAccounts = [...new Set(rows.map(r => r.account).filter(Boolean))].sort()
-  const allTypes = ['debit', 'credit']
+
+  // Map from column key → raw cell value extractor (returns '' for blank/null)
+  const COL_VALUE: Record<string, (r: ParsedRow) => string> = {
+    source:        r => r.source ?? '',
+    account:       r => r.account ?? '',
+    type:          r => r.type ?? '',
+    spending_type: r => r.spending_type ?? '',
+    category_id:   r => r.category_id ?? '',
+    status:        r => r.isDuplicate ? 'Duplicate' : r.isSoftDuplicate ? 'Possible dup' : 'New',
+  }
+
+  /** All unique values (including blank sentinel) for a filterable column */
+  function colUniqueValues(colKey: string): string[] {
+    const extractor = COL_VALUE[colKey]
+    if (!extractor) return []
+    const vals = new Set<string>()
+    let hasBlank = false
+    for (const r of rows) {
+      const v = extractor(r)
+      if (v === '') hasBlank = true
+      else vals.add(v)
+    }
+    const sorted = [...vals].sort()
+    if (hasBlank) sorted.push('__blank__')
+    return sorted
+  }
 
   const visibleRows = rows
     .filter(r => {
       if (hideDuplicates && (r.isDuplicate || r.isSoftDuplicate)) return false
-      if (filterSources.size > 0 && !filterSources.has(r.source)) return false
-      if (filterAccounts.size > 0 && !filterAccounts.has(r.account)) return false
-      if (filterTypes.size > 0 && !filterTypes.has(r.type)) return false
+      // Apply each active column filter (AND logic)
+      for (const [colKey, allowed] of columnFilters) {
+        if (allowed.size === 0) continue
+        const extractor = COL_VALUE[colKey]
+        if (!extractor) continue
+        const cellVal = extractor(r)
+        const matches = cellVal === '' ? allowed.has('__blank__') : allowed.has(cellVal)
+        if (!matches) return false
+      }
       return true
     })
     .sort((a, b) => {
@@ -1212,21 +1254,136 @@ export default function Import() {
     )
   }
 
-  function FilterChips({ label, options, active, onToggle }: { label: string; options: string[]; active: Set<string>; onToggle: (v: string) => void }) {
-    if (options.length < 2) return null
+  /**
+   * Excel-style column header filter button + dropdown.
+   * Renders a small funnel icon next to the column label.
+   * On click opens a popover with: Select All checkbox, individual value checkboxes, (Blanks) at the bottom.
+   */
+  function ColumnFilterBtn({ colKey, label, displayLabel }: { colKey: string; label?: string; displayLabel?: (v: string) => string }) {
+    const isOpen = openFilterCol === colKey
+    const activeFilter = columnFilters.get(colKey)
+    const isFiltered = (activeFilter?.size ?? 0) > 0
+    const dropdownRef = useRef<HTMLDivElement>(null)
+    const allVals = colUniqueValues(colKey)
+
+    // Close on outside click
+    useEffect(() => {
+      if (!isOpen) return
+      function handleClick(e: MouseEvent) {
+        if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+          setOpenFilterCol(null)
+        }
+      }
+      document.addEventListener('mousedown', handleClick)
+      return () => document.removeEventListener('mousedown', handleClick)
+    }, [isOpen])
+
+    if (allVals.length === 0) return label ? <span>{label}</span> : null
+
+    const selected = activeFilter ?? new Set<string>()
+    // "Select All" is checked when filter is empty (= show everything) OR all values selected
+    const allSelected = selected.size === 0 || selected.size === allVals.length
+
+    function toggleAll() {
+      if (!allSelected) {
+        // Select all = clear filter (show everything)
+        setColFilter(colKey, new Set())
+      } else {
+        // Nothing selected yet OR all selected → clear filter
+        setColFilter(colKey, new Set())
+      }
+    }
+
+    function getDisplay(v: string) {
+      if (v === '__blank__') return '(Blanks)'
+      if (displayLabel) return displayLabel(v)
+      return v
+    }
+
     return (
-      <div className="flex items-center gap-1.5 flex-wrap">
-        <span className="text-[10px] text-gray-400 uppercase tracking-wide">{label}:</span>
-        {options.map(opt => (
-          <button key={opt} onClick={() => onToggle(opt)}
-            className={`text-xs px-2.5 py-0.5 rounded-full border transition-all ${
-              active.has(opt)
-                ? 'bg-[#7FA68A] text-white border-[#7FA68A]'
-                : 'bg-white text-gray-500 border-gray-200 hover:border-[#7FA68A]'
-            }`}>
-            {opt}
-          </button>
-        ))}
+      <div className="relative inline-flex items-center gap-1" ref={dropdownRef}>
+        {label && <span>{label}</span>}
+        <button
+          onClick={e => { e.stopPropagation(); setOpenFilterCol(isOpen ? null : colKey) }}
+          title={isFiltered ? `Filtered (${selected.size} value${selected.size !== 1 ? 's' : ''})` : 'Filter'}
+          className={`flex items-center justify-center rounded transition-all hover:text-[#7FA68A] ${
+            isFiltered
+              ? 'text-[#7FA68A]'
+              : 'text-gray-300 hover:text-gray-500'
+          }`}
+        >
+          <Filter size={9} className={isFiltered ? 'fill-[#7FA68A]' : ''} />
+        </button>
+
+        {isOpen && (
+          <div
+            className="absolute top-full left-0 mt-1 bg-white border border-gray-200 rounded-xl shadow-xl z-50 min-w-[160px] max-w-[220px] overflow-hidden"
+            style={{ fontSize: '11px' }}
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Select All row */}
+            <label className="flex items-center gap-2 px-3 py-2 hover:bg-gray-50 cursor-pointer border-b border-gray-100 font-medium text-gray-700">
+              <input
+                type="checkbox"
+                checked={allSelected}
+                onChange={toggleAll}
+                className="rounded"
+              />
+              (Select All)
+            </label>
+
+            {/* Individual values */}
+            <div className="max-h-48 overflow-y-auto">
+              {allVals.map(v => {
+                const isBlank = v === '__blank__'
+                const checked = selected.size === 0 ? true : selected.has(v)
+                return (
+                  <label
+                    key={v}
+                    className={`flex items-center gap-2 px-3 py-1.5 hover:bg-gray-50 cursor-pointer ${isBlank ? 'text-gray-400 italic border-t border-gray-100' : 'text-gray-700'}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => {
+                        // When filter is empty (all shown), clicking one value means "show ONLY this"
+                        if (selected.size === 0) {
+                          // Select all except this one clicked-off value
+                          const newSel = new Set(allVals.filter(x => x !== v))
+                          setColFilter(colKey, newSel)
+                        } else {
+                          toggleColFilter(colKey, v)
+                        }
+                      }}
+                      className="rounded"
+                    />
+                    <span className="truncate">{getDisplay(v)}</span>
+                  </label>
+                )
+              })}
+            </div>
+
+            {/* Footer actions */}
+            <div className="flex gap-1 px-3 py-2 border-t border-gray-100 bg-gray-50">
+              <button
+                onClick={() => setColFilter(colKey, new Set())}
+                className="text-[10px] text-gray-400 hover:text-gray-600 underline"
+              >
+                Clear
+              </button>
+              <button
+                onClick={() => {
+                  // "Filter to blanks only"
+                  setColFilter(colKey, new Set(['__blank__']))
+                  setOpenFilterCol(null)
+                }}
+                className="text-[10px] text-[#7FA68A] hover:underline ml-auto"
+              >
+                Blanks only
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     )
   }
@@ -1519,56 +1676,52 @@ export default function Import() {
             </div>
           )}
 
-          {/* Filter chips */}
-          <div className="flex gap-4 mb-3 flex-wrap items-center bg-[#F5F2EC] rounded-2xl px-4 py-2.5">
-            <FilterChips
-              label="App"
-              options={allSources}
-              active={filterSources}
-              onToggle={v => toggleFilter(filterSources, setFilterSources, v)}
-            />
-            {allAccounts.length > 0 && (
-              <FilterChips
-                label="Account"
-                options={allAccounts}
-                active={filterAccounts}
-                onToggle={v => toggleFilter(filterAccounts, setFilterAccounts, v)}
-              />
-            )}
-            <FilterChips
-              label="Type"
-              options={allTypes}
-              active={filterTypes}
-              onToggle={v => toggleFilter(filterTypes, setFilterTypes, v)}
-            />
-            {/* Hide duplicates toggle — hides both hard dups and soft dups */}
-            {(dupCount > 0 || softDupCount > 0) && (
-              <div className="flex items-center gap-1.5">
-                <span className="text-[10px] text-gray-400 uppercase tracking-wide">Dupes:</span>
-                <button
-                  onClick={() => setHideDuplicates(h => !h)}
-                  className={`text-xs px-2.5 py-0.5 rounded-full border transition-all flex items-center gap-1 ${
-                    hideDuplicates
-                      ? 'bg-[#7FA68A] text-white border-[#7FA68A]'
-                      : 'bg-white text-gray-500 border-gray-200 hover:border-[#7FA68A]'
-                  }`}
-                >
-                  {hideDuplicates ? '✓ Hidden' : 'Hide dupes'}
-                  <span className={`text-[10px] rounded-full px-1 ${hideDuplicates ? 'bg-white/20 text-white' : 'bg-gray-100 text-gray-400'}`}>
-                    {dupCount + softDupCount}
-                  </span>
-                </button>
-              </div>
-            )}
-            {(filterSources.size > 0 || filterAccounts.size > 0 || filterTypes.size > 0 || hideDuplicates) && (
-              <button
-                onClick={() => { setFilterSources(new Set()); setFilterAccounts(new Set()); setFilterTypes(new Set()); setHideDuplicates(false) }}
-                className="text-xs text-gray-400 hover:text-gray-600 underline ml-auto"
-              >
-                Clear filters
+          {/* Active filters summary bar */}
+          {(columnFilters.size > 0 || hideDuplicates) && (
+            <div className="flex flex-wrap gap-2 mb-3 items-center bg-[#F5F2EC] rounded-2xl px-4 py-2.5">
+              <Filter size={11} className="text-[#7FA68A] flex-shrink-0" />
+              <span className="text-[10px] text-gray-500 uppercase tracking-wide flex-shrink-0">Active filters:</span>
+              {[...columnFilters.entries()].map(([colKey, vals]) => {
+                const colLabel: Record<string, string> = {
+                  source: 'App', account: 'Account', type: 'Type',
+                  spending_type: 'Spend Type', category_id: 'Category', status: 'Status',
+                }
+                const displayVal = (v: string) => {
+                  if (v === '__blank__') return 'Blanks'
+                  if (colKey === 'category_id') return categories.find(c => c.id === v)?.name ?? v
+                  return v
+                }
+                return (
+                  <div key={colKey} className="flex items-center gap-1 bg-white border border-[#C8DDD0] rounded-full px-2.5 py-0.5 text-xs text-gray-700">
+                    <span className="text-gray-400">{colLabel[colKey] ?? colKey}:</span>
+                    <span className="text-[#7FA68A] font-medium">{[...vals].map(displayVal).join(', ')}</span>
+                    <button onClick={() => setColFilter(colKey, new Set())} className="text-gray-300 hover:text-red-400 ml-1 leading-none">✕</button>
+                  </div>
+                )
+              })}
+              {hideDuplicates && (
+                <div className="flex items-center gap-1 bg-white border border-amber-200 rounded-full px-2.5 py-0.5 text-xs text-amber-700">
+                  <span>Dupes hidden</span>
+                  <button onClick={() => setHideDuplicates(false)} className="text-amber-300 hover:text-red-400 ml-1 leading-none">✕</button>
+                </div>
+              )}
+              <button onClick={clearAllFilters} className="text-xs text-gray-400 hover:text-gray-600 underline ml-auto">
+                Clear all
               </button>
-            )}
-          </div>
+            </div>
+          )}
+
+          {/* Hide duplicates toggle (shown always if dupes exist) */}
+          {(dupCount > 0 || softDupCount > 0) && !hideDuplicates && (
+            <div className="mb-3 flex items-center gap-2">
+              <button
+                onClick={() => setHideDuplicates(true)}
+                className="text-xs text-gray-400 hover:text-gray-600 border border-gray-200 bg-white rounded-xl px-3 py-1.5 flex items-center gap-1.5 transition-all hover:border-[#7FA68A]"
+              >
+                Hide {dupCount + softDupCount} duplicate{dupCount + softDupCount !== 1 ? 's' : ''}
+              </button>
+            </div>
+          )}
 
           <div className="bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden">
             <div className="overflow-x-auto">
@@ -1610,23 +1763,38 @@ export default function Import() {
                       <ResizeHandle currentWidth={colWidths.amount} onWidthChange={w => updateColWidth('amount', w)} />
                     </th>
                     <th className="px-3 py-3 text-left relative overflow-hidden" style={{ width: colWidths.category }}>
-                      Category
+                      <div className="flex items-center gap-1">
+                        <span>Category</span>
+                        <ColumnFilterBtn colKey="category_id" displayLabel={v => categories.find(c => c.id === v)?.name ?? v} />
+                      </div>
                       <ResizeHandle currentWidth={colWidths.category} onWidthChange={w => updateColWidth('category', w)} />
                     </th>
                     <th className="px-3 py-3 text-left relative overflow-hidden" style={{ width: colWidths.type }}>
-                      Type
+                      <div className="flex items-center gap-1">
+                        <span>Type</span>
+                        <ColumnFilterBtn colKey="spending_type" />
+                      </div>
                       <ResizeHandle currentWidth={colWidths.type} onWidthChange={w => updateColWidth('type', w)} />
                     </th>
                     <th className="px-3 py-3 text-left relative overflow-hidden" style={{ width: colWidths.source }}>
-                      App
+                      <div className="flex items-center gap-1">
+                        <span>App</span>
+                        <ColumnFilterBtn colKey="source" />
+                      </div>
                       <ResizeHandle currentWidth={colWidths.source} onWidthChange={w => updateColWidth('source', w)} />
                     </th>
                     <th className="px-3 py-3 text-left relative overflow-hidden" style={{ width: colWidths.account }}>
-                      Account
+                      <div className="flex items-center gap-1">
+                        <span>Account</span>
+                        <ColumnFilterBtn colKey="account" />
+                      </div>
                       <ResizeHandle currentWidth={colWidths.account} onWidthChange={w => updateColWidth('account', w)} />
                     </th>
                     <th className="px-3 py-3 text-left relative overflow-hidden" style={{ width: colWidths.status }}>
-                      Status
+                      <div className="flex items-center gap-1">
+                        <span>Status</span>
+                        <ColumnFilterBtn colKey="status" />
+                      </div>
                       <ResizeHandle currentWidth={colWidths.status} onWidthChange={w => updateColWidth('status', w)} />
                     </th>
                     <th className="px-3 py-3 text-left relative overflow-hidden" style={{ width: colWidths.del }}></th>
