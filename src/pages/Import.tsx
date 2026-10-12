@@ -564,6 +564,7 @@ interface ColWidths {
   amount: number
   category: number
   type: number
+  source: number
   account: number
   status: number
   del: number
@@ -577,7 +578,8 @@ const DEFAULT_COL_WIDTHS: ColWidths = {
   amount: 110,
   category: 170,
   type: 130,
-  account: 130,
+  source: 100,
+  account: 120,
   status: 100,
   del: 36,
 }
@@ -1118,7 +1120,7 @@ export default function Import() {
 
   // ── Derived: filtered + sorted rows ──────────────────────────────────────────
 
-  const allSources = [...new Set(rows.map(r => r.source))].sort()
+  const allSources = [...new Set(rows.map(r => r.source).filter(Boolean))].sort()
   const allAccounts = [...new Set(rows.map(r => r.account).filter(Boolean))].sort()
   const allTypes = ['debit', 'credit']
 
@@ -1544,6 +1546,7 @@ export default function Import() {
                   <col style={{ width: colWidths.amount }} />
                   <col style={{ width: colWidths.category }} />
                   <col style={{ width: colWidths.type }} />
+                  <col style={{ width: colWidths.source }} />
                   <col style={{ width: colWidths.account }} />
                   <col style={{ width: colWidths.status }} />
                   <col style={{ width: colWidths.del }} />
@@ -1578,6 +1581,10 @@ export default function Import() {
                     <th className="px-3 py-3 text-left relative overflow-hidden" style={{ width: colWidths.type }}>
                       Type
                       <ResizeHandle currentWidth={colWidths.type} onWidthChange={w => updateColWidth('type', w)} />
+                    </th>
+                    <th className="px-3 py-3 text-left relative overflow-hidden" style={{ width: colWidths.source }}>
+                      App
+                      <ResizeHandle currentWidth={colWidths.source} onWidthChange={w => updateColWidth('source', w)} />
                     </th>
                     <th className="px-3 py-3 text-left relative overflow-hidden" style={{ width: colWidths.account }}>
                       Account
@@ -1647,23 +1654,27 @@ export default function Import() {
                         </select>
                       </td>
                       <td className="px-3 py-2.5">
-                        <div className="flex flex-col gap-1">
-                          <select
-                            className="text-xs bg-[#F5F2EC] text-gray-500 px-2 py-0.5 rounded-full border-none outline-none cursor-pointer hover:bg-[#EDE9E0] w-fit"
-                            value={row.source}
-                            onChange={e => updateRow(row.id, 'source', e.target.value)}
-                          >
-                            {['GPay', 'PhonePe', 'Paytm', ''].map(s => (
-                              <option key={s} value={s}>{s || '—'}</option>
-                            ))}
-                          </select>
-                          <input
-                            className="text-[10px] text-gray-400 font-medium px-2 bg-transparent border-b border-transparent hover:border-gray-200 focus:border-[#7FA68A] outline-none w-24"
-                            placeholder="account…"
-                            value={row.account}
-                            onChange={e => updateRow(row.id, 'account', e.target.value)}
-                          />
-                        </div>
+                        <select
+                          className="text-xs bg-[#F5F2EC] text-gray-500 px-2 py-0.5 rounded-full border-none outline-none cursor-pointer hover:bg-[#EDE9E0] w-full"
+                          value={row.source}
+                          onChange={e => updateRow(row.id, 'source', e.target.value)}
+                        >
+                          {['GPay', 'PhonePe', 'Paytm', ''].map(s => (
+                            <option key={s} value={s}>{s || '—'}</option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <select
+                          className="text-xs bg-[#F5F2EC] text-gray-600 px-2 py-0.5 rounded-full border-none outline-none cursor-pointer hover:bg-[#EDE9E0] w-full"
+                          value={row.account}
+                          onChange={e => updateRow(row.id, 'account', e.target.value)}
+                        >
+                          <option value="">— none —</option>
+                          {['SBI', 'Niyo SBM', 'Axis MyZone', 'Axis Neo', ...allAccounts.filter(a => !['SBI','Niyo SBM','Axis MyZone','Axis Neo'].includes(a))].map(a => (
+                            <option key={a} value={a}>{a}</option>
+                          ))}
+                        </select>
                       </td>
                       <td className="px-3 py-2.5">
                         {row.isDuplicate
@@ -1696,7 +1707,7 @@ export default function Import() {
                   ))}
                   {visibleRows.length === 0 && (
                     <tr>
-                      <td colSpan={10} className="px-3 py-8 text-center text-sm text-gray-400">
+                      <td colSpan={11} className="px-3 py-8 text-center text-sm text-gray-400">
                         No rows match the current filters.
                       </td>
                     </tr>
