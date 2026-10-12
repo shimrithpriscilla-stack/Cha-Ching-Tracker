@@ -9,6 +9,8 @@ export interface SourceAccount {
   label: string
   account_type: 'savings' | 'credit' | 'wallet'
   color?: string
+  credit_limit?: number | null
+  monthly_budget?: number | null
 }
 
 const TYPE_LABELS: Record<string, string> = {
@@ -28,7 +30,23 @@ const PRESET_COLORS = [
   '#F0CECE', '#C4E8D5', '#F0EBE0', '#FFF3C4',
 ]
 
-const EMPTY_FORM: { last4: string; bank_name: string; label: string; account_type: 'savings' | 'credit' | 'wallet'; color: string } = { last4: '', bank_name: '', label: '', account_type: 'savings', color: PRESET_COLORS[0] }
+const EMPTY_FORM: {
+  last4: string
+  bank_name: string
+  label: string
+  account_type: 'savings' | 'credit' | 'wallet'
+  color: string
+  credit_limit: string
+  monthly_budget: string
+} = {
+  last4: '',
+  bank_name: '',
+  label: '',
+  account_type: 'savings',
+  color: PRESET_COLORS[0],
+  credit_limit: '',
+  monthly_budget: '',
+}
 
 export default function Settings() {
   const [accounts, setAccounts] = useState<SourceAccount[]>([])
@@ -69,6 +87,8 @@ export default function Settings() {
       label: a.label,
       account_type: a.account_type as 'savings' | 'credit' | 'wallet',
       color: (a as any).color ?? PRESET_COLORS[0],
+      credit_limit: a.credit_limit != null ? String(a.credit_limit) : '',
+      monthly_budget: a.monthly_budget != null ? String(a.monthly_budget) : '',
     })
     setError('')
     setShowForm(true)
@@ -84,6 +104,9 @@ export default function Settings() {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) { setError('Not logged in'); setSaving(false); return }
 
+    const creditLimitVal = form.credit_limit.trim() ? parseFloat(form.credit_limit) : null
+    const monthlyBudgetVal = form.monthly_budget.trim() ? parseFloat(form.monthly_budget) : null
+
     const payload = {
       user_id: user.id,
       last4: form.last4.trim() || null,
@@ -91,6 +114,8 @@ export default function Settings() {
       label: form.label.trim(),
       account_type: form.account_type,
       color: form.color,
+      credit_limit: form.account_type === 'credit' ? creditLimitVal : null,
+      monthly_budget: monthlyBudgetVal,
     }
 
     if (editId) {
@@ -154,10 +179,16 @@ export default function Settings() {
               </div>
               <div className="flex-1 min-w-0">
                 <div className="font-semibold text-gray-800 text-sm">{a.label}</div>
-                <div className="text-xs text-gray-400 mt-0.5 flex items-center gap-2">
+                <div className="text-xs text-gray-400 mt-0.5 flex items-center gap-2 flex-wrap">
                   <span>{a.bank_name}</span>
                   {a.last4 && <span className="bg-gray-100 px-2 py-0.5 rounded-full">••••{a.last4}</span>}
                   <span className="bg-gray-100 px-2 py-0.5 rounded-full">{TYPE_LABELS[a.account_type]}</span>
+                  {a.account_type === 'credit' && a.credit_limit != null && (
+                    <span className="bg-blue-50 text-blue-500 px-2 py-0.5 rounded-full">Limit ₹{a.credit_limit.toLocaleString('en-IN')}</span>
+                  )}
+                  {a.monthly_budget != null && (
+                    <span className="bg-green-50 text-green-600 px-2 py-0.5 rounded-full">Budget ₹{a.monthly_budget.toLocaleString('en-IN')}/mo</span>
+                  )}
                 </div>
               </div>
               <div className="flex items-center gap-1 flex-shrink-0">
@@ -180,7 +211,7 @@ export default function Settings() {
       {/* Add / Edit modal */}
       {showForm && (
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-xl">
+          <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-xl max-h-[90vh] overflow-y-auto">
             <h2 className="text-lg font-light text-gray-800 mb-4" style={{ fontFamily: 'Georgia,serif' }}>
               {editId ? 'Edit Account' : 'Add Account'}
             </h2>
@@ -227,6 +258,43 @@ export default function Settings() {
                   <option value="wallet">Wallet / Prepaid</option>
                 </select>
               </div>
+
+              {/* Credit limit — only for credit cards */}
+              {form.account_type === 'credit' && (
+                <div>
+                  <label className="text-xs text-gray-500 mb-1 block">Credit Limit <span className="text-gray-300">(optional)</span></label>
+                  <div className="relative">
+                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-sm text-gray-400">₹</span>
+                    <input
+                      type="number"
+                      min="0"
+                      placeholder="e.g. 100000"
+                      className="w-full border border-gray-200 rounded-xl pl-7 pr-4 py-2.5 text-sm outline-none focus:border-[#7FA68A]"
+                      value={form.credit_limit}
+                      onChange={e => setForm(f => ({ ...f, credit_limit: e.target.value }))}
+                    />
+                  </div>
+                  <p className="text-[10px] text-gray-400 mt-1">Used to calculate utilisation % in Budgets</p>
+                </div>
+              )}
+
+              {/* Monthly budget */}
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Monthly Spend Budget <span className="text-gray-300">(optional)</span></label>
+                <div className="relative">
+                  <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-sm text-gray-400">₹</span>
+                  <input
+                    type="number"
+                    min="0"
+                    placeholder="e.g. 20000"
+                    className="w-full border border-gray-200 rounded-xl pl-7 pr-4 py-2.5 text-sm outline-none focus:border-[#7FA68A]"
+                    value={form.monthly_budget}
+                    onChange={e => setForm(f => ({ ...f, monthly_budget: e.target.value }))}
+                  />
+                </div>
+                <p className="text-[10px] text-gray-400 mt-1">Shows spend vs budget in the Budgets page</p>
+              </div>
+
               <div>
                 <label className="text-xs text-gray-500 mb-1 block">Colour</label>
                 <div className="flex gap-2 flex-wrap">

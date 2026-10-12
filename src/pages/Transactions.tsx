@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { supabase } from '../supabase'
-import { Plus, Search, Edit2, Trash2, ArrowUpDown, CheckSquare, Square, Download, ChevronDown, X } from 'lucide-react'
+import { Plus, Search, Edit2, Trash2, ArrowUpDown, CheckSquare, Square, Download, ChevronDown, X, Filter } from 'lucide-react'
 
 interface Transaction {
   id: string
@@ -41,6 +41,37 @@ const CATEGORY_COLORS: Record<string, string> = {
   Gifting: '#F0CECE', Transport: '#FFF3C4', Commute: '#E8D5F0',
 }
 
+const BLANK = '__blank__'
+
+// Maps a column key to how we extract a cell value from a transaction
+type ColKey = 'category' | 'spending_type' | 'account' | 'app_source' | 'mode'
+
+function getColValue(colKey: ColKey, t: Transaction): string {
+  if (colKey === 'category') return t.categories?.name ?? ''
+  if (colKey === 'spending_type') return t.spending_type ?? ''
+  if (colKey === 'account') return t.source_accounts?.label ?? ''
+  if (colKey === 'app_source') {
+    const m = (t.notes ?? '').match(/APP:([^\s|]+)/)
+    return m?.[1] ?? ''
+  }
+  if (colKey === 'mode') return t.payment_modes?.name ?? ''
+  return ''
+}
+
+const COL_LABELS: Record<ColKey, string> = {
+  category: 'Category',
+  spending_type: 'Type',
+  account: 'Account',
+  app_source: 'App',
+  mode: 'Mode',
+}
+
+const SPENDING_TYPE_LABELS: Record<string, string> = {
+  necessary: 'Necessary',
+  unnecessary: 'Discretionary',
+  credit: 'Credit',
+}
+
 export default function Transactions() {
   const [txns, setTxns] = useState<Transaction[]>([])
   const [categories, setCategories] = useState<DropdownItem[]>([])
@@ -50,16 +81,18 @@ export default function Transactions() {
   const [loading, setLoading] = useState(true)
   const [period, setPeriod] = useState<Period>('month')
   const [search, setSearch] = useState('')
-  const [filterCat, setFilterCat] = useState('all')
-  const [filterType, setFilterType] = useState('all')
-  const [filterAccount, setFilterAccount] = useState('all')
-  const [filterAppSource, setFilterAppSource] = useState('all')
-  const [filterMode, setFilterMode] = useState('all')
+
+  // Excel-style column filters: Map<colKey, Set<value | '__blank__'>>
+  const [columnFilters, setColumnFilters] = useState<Map<ColKey, Set<string>>>(new Map())
+  const [openFilterCol, setOpenFilterCol] = useState<ColKey | null>(null)
+
+  // Date / amount range (kept as dedicated inputs since they're not value-list filters)
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [amtMin, setAmtMin] = useState('')
   const [amtMax, setAmtMax] = useState('')
   const [showMoreFilters, setShowMoreFilters] = useState(false)
+
   const [form_source_account_id, setFormSourceAccountId] = useState('')
   const [form_app_source, setFormAppSource] = useState('')
   const [sortField, setSortField] = useState<SortField>('date')
@@ -80,6 +113,7 @@ export default function Transactions() {
   const [bulkEditSaving, setBulkEditSaving] = useState(false)
   const [bulkCategoryId, setBulkCategoryId] = useState('')
   const [bulkSpendingType, setBulkSpendingType] = useState('')
+  const [bulkAccountId, setBulkAccountId] = useState('')
 
   async function load() {
     const { data: { user } } = await supabase.auth.getUser()
@@ -90,7 +124,6 @@ export default function Transactions() {
       user ? supabase.from('source_accounts').select('id, label, color').eq('user_id', user.id).order('label') : Promise.resolve({ data: [] }),
     ])
 
-    // Try with source_accounts join; fall back gracefully if column doesn't exist yet
     let txnData: Transaction[] = []
     const withJoin = await supabase
       .from('transactions')
@@ -100,7 +133,6 @@ export default function Transactions() {
     if (!withJoin.error) {
       txnData = withJoin.data ?? []
     } else {
-      // Column likely not added yet — fetch without the join so existing data stays visible
       const withoutJoin = await supabase
         .from('transactions')
         .select('*, categories(name), payment_modes(name), platforms(name)')
@@ -120,15 +152,190 @@ export default function Transactions() {
 
   useEffect(() => { load() }, [period])
 
+  // --- Column filter helpers ---
+  function colUniqueValues(colKey: ColKey): string[] {
+    const seen = new Set<string>()
+    let hasBlank = false
+    for (const t of txns) {
+      const v = getColValue(colKey, t)
+      if (v === '') hasBlank = true
+      else seen.add(v)
+    }
+    const sorted = [...seen].sort()
+    if (hasBlank) sorted.push(BLANK)
+    return sorted
+  }
+
+  function toggleColFilter(colKey: ColKey, value: string) {
+    setColumnFilters(prev => {
+      const next = new Map(prev)
+      const cur = new Set(next.get(colKey) ?? [])
+      if (cur.has(value)) cur.delete(value); else cur.add(value)
+      if (cur.size === 0) next.delete(colKey); else next.set(colKey, cur)
+      return next
+    })
+  }
+
+  function setColFilter(colKey: ColKey, values: Set<string>) {
+    setColumnFilters(prev => {
+      const next = new Map(prev)
+      if (values.size === 0) next.delete(colKey); else next.set(colKey, values)
+      return next
+    })
+  }
+
+  function clearAllFilters() {
+    setColumnFilters(new Map())
+    setDateFrom(''); setDateTo(''); setAmtMin(''); setAmtMax('')
+    setSearch('')
+  }
+
+  // --- Filtered rows (AND across all column filters + date/amount/search) ---
+  const filtered = txns
+    .filter(t => {
+      // Column filters (AND logic)
+      for (const [colKey, allowed] of columnFilters) {
+        if (allowed.size === 0) continue
+        const v = getColValue(colKey, t)
+        const matches = v === '' ? allowed.has(BLANK) : allowed.has(v)
+        if (!matches) return false
+      }
+      // Date range
+      if (dateFrom && t.date < dateFrom) return false
+      if (dateTo && t.date > dateTo) return false
+      // Amount range
+      const absAmt = Math.abs(t.amount)
+      if (amtMin && absAmt < parseFloat(amtMin)) return false
+      if (amtMax && absAmt > parseFloat(amtMax)) return false
+      // Search
+      if (search) {
+        const q = search.toLowerCase()
+        if (
+          !(t.merchant ?? '').toLowerCase().includes(q) &&
+          !(t.notes ?? '').toLowerCase().includes(q) &&
+          !(t.categories?.name ?? '').toLowerCase().includes(q)
+        ) return false
+      }
+      return true
+    })
+    .sort((a, b) => {
+      if (sortField === 'date') {
+        const diff = a.date.localeCompare(b.date)
+        return sortDir === 'asc' ? diff : -diff
+      }
+      const diff = a.amount - b.amount
+      return sortDir === 'asc' ? diff : -diff
+    })
+
+  const total = filtered.reduce((s, t) => s + t.amount, 0)
+  const filteredIds = filtered.map(t => t.id)
+  const allSelected = filteredIds.length > 0 && filteredIds.every(id => selectedIds.has(id))
+  const hasActiveFilters = columnFilters.size > 0 || dateFrom || dateTo || amtMin || amtMax
+
+  // --- ColumnFilterBtn component ---
+  function ColumnFilterBtn({ colKey, displayLabel }: { colKey: ColKey; displayLabel?: (v: string) => string }) {
+    const isOpen = openFilterCol === colKey
+    const activeFilter = columnFilters.get(colKey)
+    const isFiltered = (activeFilter?.size ?? 0) > 0
+    const dropdownRef = useRef<HTMLDivElement>(null)
+    const allVals = colUniqueValues(colKey)
+
+    useEffect(() => {
+      if (!isOpen) return
+      function handleClick(e: MouseEvent) {
+        if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+          setOpenFilterCol(null)
+        }
+      }
+      document.addEventListener('mousedown', handleClick)
+      return () => document.removeEventListener('mousedown', handleClick)
+    }, [isOpen])
+
+    const label = (v: string) => {
+      if (v === BLANK) return '(Blanks)'
+      return displayLabel ? displayLabel(v) : v
+    }
+
+    const allChecked = allVals.every(v => activeFilter?.has(v))
+    const someChecked = !allChecked && allVals.some(v => activeFilter?.has(v))
+
+    function toggleAll() {
+      if (allChecked || someChecked) {
+        setColFilter(colKey, new Set())
+      } else {
+        setColFilter(colKey, new Set(allVals))
+      }
+    }
+
+    return (
+      <div className="relative inline-block" ref={dropdownRef}>
+        <button
+          onClick={e => { e.stopPropagation(); setOpenFilterCol(isOpen ? null : colKey) }}
+          className={`p-0.5 rounded transition-colors ${isFiltered ? 'text-[#7FA68A]' : 'text-gray-300 hover:text-gray-500'}`}
+          title={`Filter ${COL_LABELS[colKey]}`}
+        >
+          <Filter size={11} fill={isFiltered ? '#7FA68A' : 'none'} />
+        </button>
+        {isOpen && (
+          <div className="absolute left-0 top-full mt-1 z-50 bg-white border border-gray-200 rounded-xl shadow-lg min-w-44 py-1.5">
+            {/* Select All */}
+            <label className="flex items-center gap-2 px-3 py-1.5 hover:bg-gray-50 cursor-pointer border-b border-gray-100 mb-1">
+              <input
+                type="checkbox"
+                checked={allChecked}
+                ref={el => { if (el) el.indeterminate = someChecked }}
+                onChange={toggleAll}
+                className="rounded accent-[#7FA68A]"
+              />
+              <span className="text-xs text-gray-500 font-medium">Select All</span>
+            </label>
+            <div className="max-h-48 overflow-y-auto">
+              {allVals.map(v => (
+                <label key={v} className="flex items-center gap-2 px-3 py-1.5 hover:bg-gray-50 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={activeFilter?.has(v) ?? false}
+                    onChange={() => toggleColFilter(colKey, v)}
+                    className="rounded accent-[#7FA68A]"
+                  />
+                  <span className={`text-xs ${v === BLANK ? 'text-gray-400 italic' : 'text-gray-700'}`}>{label(v)}</span>
+                </label>
+              ))}
+            </div>
+            {/* Blanks only shortcut */}
+            {allVals.includes(BLANK) && (
+              <div className="border-t border-gray-100 mt-1 pt-1">
+                <button
+                  onClick={() => { setColFilter(colKey, new Set([BLANK])); setOpenFilterCol(null) }}
+                  className="w-full text-left px-3 py-1.5 text-xs text-gray-400 hover:bg-gray-50 hover:text-gray-600"
+                >
+                  Blanks only →
+                </button>
+              </div>
+            )}
+            {isFiltered && (
+              <div className="border-t border-gray-100 mt-1 pt-1">
+                <button
+                  onClick={() => { setColFilter(colKey, new Set()); setOpenFilterCol(null) }}
+                  className="w-full text-left px-3 py-1.5 text-xs text-red-400 hover:bg-red-50"
+                >
+                  Clear filter
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    )
+  }
+
   async function save() {
     if (!form.amount || !form.date) return
-    // Rebuild notes: keep user note, replace APP: tag with new selection
     const baseNotes = form.notes
       .replace(/APP:[^\s|]+\s*\|?\s*/g, '')
       .replace(/UTR:[^\s|]+\s*\|?\s*/g, '')
       .trim().replace(/^\||\|$/g, '').trim()
     const appTag = form_app_source ? `APP:${form_app_source}` : ''
-    // Preserve existing UTR from original notes (don't lose it on edit)
     const existingTxn = txns.find(t => t.id === editId)
     const utrMatch = existingTxn ? (existingTxn.notes ?? '').match(/UTR:[^\s|]+/) : null
     const utrTag = utrMatch ? utrMatch[0] : ''
@@ -172,9 +379,10 @@ export default function Transactions() {
     if (selectedIds.size === 0) return
     setBulkEditSaving(true)
     const ids = [...selectedIds]
-    const updates: Record<string, string> = {}
+    const updates: Record<string, string | null> = {}
     if (bulkCategoryId) updates.category_id = bulkCategoryId
     if (bulkSpendingType) updates.spending_type = bulkSpendingType
+    if (bulkAccountId !== '') updates.source_account_id = bulkAccountId || null
     if (Object.keys(updates).length > 0) {
       await supabase.from('transactions').update(updates).in('id', ids)
     }
@@ -182,6 +390,7 @@ export default function Transactions() {
     setBulkEditOpen(false)
     setBulkCategoryId('')
     setBulkSpendingType('')
+    setBulkAccountId('')
     load()
   }
 
@@ -205,7 +414,6 @@ export default function Transactions() {
     setEditId(t.id)
     setForm({ date: t.date.slice(0, 10), amount: String(Math.abs(t.amount)), category_id: (t as any).category_id ?? '', mode_id: (t as any).mode_id ?? '', platform_id: (t as any).platform_id ?? '', spending_type: t.spending_type, notes: t.notes ?? '', merchant: t.merchant ?? '' })
     setFormSourceAccountId((t as any).source_account_id ?? (t.source_accounts?.id ?? ''))
-    // Extract current app source from notes
     const appMatch = (t.notes ?? '').match(/APP:([^\s|]+)/)
     setFormAppSource(appMatch?.[1] ?? '')
     setShowForm(true)
@@ -214,51 +422,6 @@ export default function Transactions() {
   function toggleSort(field: SortField) {
     if (sortField === field) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
     else { setSortField(field); setSortDir(field === 'amount' ? 'desc' : 'asc') }
-  }
-
-  const filtered = txns
-    .filter(t => {
-      if (filterCat !== 'all' && t.categories?.name !== filterCat) return false
-      if (filterType !== 'all' && t.spending_type !== filterType) return false
-      if (filterAccount !== 'all' && t.source_accounts?.id !== filterAccount) return false
-      if (filterMode !== 'all' && t.payment_modes?.name !== filterMode) return false
-      if (filterAppSource !== 'all') {
-        const appMatch = (t.notes ?? '').match(/APP:([^\s|]+)/)
-        if (!appMatch || appMatch[1] !== filterAppSource) return false
-      }
-      if (dateFrom && t.date < dateFrom) return false
-      if (dateTo && t.date > dateTo) return false
-      const absAmount = Math.abs(t.amount)
-      if (amtMin && absAmount < parseFloat(amtMin)) return false
-      if (amtMax && absAmount > parseFloat(amtMax)) return false
-      if (search) {
-        const q = search.toLowerCase()
-        const inMerchant = (t.merchant ?? '').toLowerCase().includes(q)
-        const inNotes = (t.notes ?? '').toLowerCase().includes(q)
-        const inCategory = (t.categories?.name ?? '').toLowerCase().includes(q)
-        if (!inMerchant && !inNotes && !inCategory) return false
-      }
-      return true
-    })
-    .sort((a, b) => {
-      if (sortField === 'date') {
-        const diff = a.date.localeCompare(b.date)
-        return sortDir === 'asc' ? diff : -diff
-      }
-      const diff = a.amount - b.amount
-      return sortDir === 'asc' ? diff : -diff
-    })
-
-  const total = filtered.reduce((s, t) => s + t.amount, 0)
-  const filteredIds = filtered.map(t => t.id)
-  const allSelected = filteredIds.length > 0 && filteredIds.every(id => selectedIds.has(id))
-  const hasActiveFilters = filterCat !== 'all' || filterType !== 'all' || filterAccount !== 'all' || filterMode !== 'all' || filterAppSource !== 'all' || dateFrom || dateTo || amtMin || amtMax
-
-  function clearAllFilters() {
-    setFilterCat('all'); setFilterType('all'); setFilterAccount('all')
-    setFilterMode('all'); setFilterAppSource('all')
-    setDateFrom(''); setDateTo(''); setAmtMin(''); setAmtMax('')
-    setSearch('')
   }
 
   function exportCSV() {
@@ -285,6 +448,13 @@ export default function Transactions() {
     { key: '7d', label: '7 Days' }, { key: '30d', label: '30 Days' },
     { key: 'month', label: 'This Month' }, { key: '3m', label: '3 Months' }, { key: 'all', label: 'All Time' }
   ]
+
+  // Active filter summary pill display value
+  function filterDisplayVal(colKey: ColKey, v: string) {
+    if (v === BLANK) return '(Blanks)'
+    if (colKey === 'spending_type') return SPENDING_TYPE_LABELS[v] ?? v
+    return v
+  }
 
   return (
     <div className="p-6 max-w-4xl">
@@ -316,7 +486,7 @@ export default function Transactions() {
         ))}
       </div>
 
-      {/* Filters */}
+      {/* Search + date/amount range */}
       <div className="flex flex-col gap-2 mb-3">
         <div className="flex gap-2 flex-wrap items-center">
           <div className="flex-1 min-w-48 relative">
@@ -324,59 +494,26 @@ export default function Transactions() {
             <input className="w-full border border-gray-200 rounded-xl pl-9 pr-4 py-2 text-sm outline-none focus:border-[#7FA68A]"
               placeholder="Search merchant, notes, category…" value={search} onChange={e => setSearch(e.target.value)} />
           </div>
-          <select className="border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none bg-white text-gray-600"
-            value={filterCat} onChange={e => setFilterCat(e.target.value)}>
-            <option value="all">All Categories</option>
-            {categories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
-          </select>
-          <select className="border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none bg-white text-gray-600"
-            value={filterType} onChange={e => setFilterType(e.target.value)}>
-            <option value="all">All Types</option>
-            <option value="necessary">Necessary</option>
-            <option value="unnecessary">Unnecessary</option>
-            <option value="credit">Credit</option>
-          </select>
-          {sourceAccounts.length > 0 && (
-            <select className="border border-gray-200 rounded-xl px-3 py-2 text-sm outline-none bg-white text-gray-600"
-              value={filterAccount} onChange={e => setFilterAccount(e.target.value)}>
-              <option value="all">All Accounts</option>
-              {sourceAccounts.map(a => <option key={a.id} value={a.id}>{a.label}</option>)}
-            </select>
-          )}
           <button
             onClick={() => setShowMoreFilters(v => !v)}
             className={`flex items-center gap-1.5 text-sm px-3 py-2 rounded-xl border transition-all ${showMoreFilters ? 'border-[#7FA68A] text-[#7FA68A] bg-[#F2F8F4]' : 'border-gray-200 text-gray-500 hover:border-gray-300'}`}>
             <ChevronDown size={13} className={`transition-transform ${showMoreFilters ? 'rotate-180' : ''}`} />
-            More filters
-            {(filterMode !== 'all' || filterAppSource !== 'all' || dateFrom || dateTo || amtMin || amtMax) && (
+            Date / Amount
+            {(dateFrom || dateTo || amtMin || amtMax) && (
               <span className="w-4 h-4 rounded-full bg-[#7FA68A] text-white text-[9px] flex items-center justify-center">
-                {[filterMode !== 'all', filterAppSource !== 'all', !!(dateFrom || dateTo), !!(amtMin || amtMax)].filter(Boolean).length}
+                {[!!(dateFrom || dateTo), !!(amtMin || amtMax)].filter(Boolean).length}
               </span>
             )}
           </button>
           {hasActiveFilters && (
             <button onClick={clearAllFilters} className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition-all">
-              <X size={11} /> Clear filters
+              <X size={11} /> Clear all
             </button>
           )}
         </div>
 
         {showMoreFilters && (
-          <div className="flex gap-2 flex-wrap items-center bg-gray-50 rounded-xl px-4 py-3 border border-gray-100">
-            <select className="border border-gray-200 rounded-xl px-3 py-1.5 text-xs outline-none bg-white text-gray-600"
-              value={filterAppSource} onChange={e => setFilterAppSource(e.target.value)}>
-              <option value="all">All Apps</option>
-              <option value="GPay">GPay</option>
-              <option value="PhonePe">PhonePe</option>
-              <option value="Paytm">Paytm</option>
-            </select>
-            {modes.length > 0 && (
-              <select className="border border-gray-200 rounded-xl px-3 py-1.5 text-xs outline-none bg-white text-gray-600"
-                value={filterMode} onChange={e => setFilterMode(e.target.value)}>
-                <option value="all">All Modes</option>
-                {modes.map(m => <option key={m.id} value={m.name}>{m.name}</option>)}
-              </select>
-            )}
+          <div className="flex gap-3 flex-wrap items-center bg-gray-50 rounded-xl px-4 py-3 border border-gray-100">
             <div className="flex items-center gap-1.5">
               <span className="text-[10px] text-gray-400 uppercase tracking-wide">Date</span>
               <input type="date" className="border border-gray-200 rounded-xl px-2.5 py-1.5 text-xs outline-none bg-white"
@@ -398,6 +535,29 @@ export default function Transactions() {
           </div>
         )}
       </div>
+
+      {/* Active column filter pills */}
+      {columnFilters.size > 0 && (
+        <div className="flex flex-wrap gap-2 mb-3 items-center bg-[#F5F2EC] rounded-2xl px-4 py-2.5">
+          <span className="text-[10px] text-gray-400 uppercase tracking-wide mr-1">Filters:</span>
+          {[...columnFilters.entries()].map(([colKey, vals]) => (
+            <div key={colKey} className="flex items-center gap-1 bg-white border border-[#C8DDD0] rounded-full px-2.5 py-0.5 text-xs text-gray-700">
+              <span className="text-gray-400">{COL_LABELS[colKey]}:</span>
+              <span className="text-[#7FA68A] font-medium">
+                {[...vals].map(v => filterDisplayVal(colKey, v)).join(', ')}
+              </span>
+              <button
+                onClick={() => setColFilter(colKey, new Set())}
+                className="ml-1 text-gray-300 hover:text-gray-500 leading-none"
+              >✕</button>
+            </div>
+          ))}
+          <button
+            onClick={() => setColumnFilters(new Map())}
+            className="text-xs text-gray-400 hover:text-gray-600 ml-auto"
+          >Clear column filters</button>
+        </div>
+      )}
 
       {/* Sort controls */}
       <div className="flex items-center gap-4 mb-3">
@@ -439,7 +599,7 @@ export default function Transactions() {
           <span className="text-sm text-red-500 font-medium flex-1">{selectedIds.size} selected</span>
           <button onClick={() => setSelectedIds(new Set())} className="text-xs text-gray-400 hover:text-gray-600">Clear</button>
           <button
-            onClick={() => { setBulkCategoryId(''); setBulkSpendingType(''); setBulkEditOpen(true) }}
+            onClick={() => { setBulkCategoryId(''); setBulkSpendingType(''); setBulkAccountId(''); setBulkEditOpen(true) }}
             className="flex items-center gap-1.5 bg-[#7FA68A] text-white px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-[#6d9478] transition-all"
           >
             <Edit2 size={12} /> Edit {selectedIds.size}
@@ -454,16 +614,38 @@ export default function Transactions() {
       )}
 
       {/* Transaction list */}
-      <div className="flex flex-col gap-2">
-        {loading ? <p className="text-gray-400 text-sm">Loading...</p> : filtered.length === 0 ? (
+      <div className="flex flex-col gap-0 bg-white border border-gray-100 rounded-2xl shadow-sm overflow-hidden">
+        {/* Column header row with filter buttons */}
+        <div className="grid grid-cols-[auto_1fr_auto_auto_auto_auto_auto_auto] gap-0 px-4 py-2 border-b border-gray-100 bg-gray-50">
+          <div className="w-6" />
+          <div className="flex items-center gap-1 text-[10px] text-gray-400 uppercase tracking-wide">Merchant</div>
+          <div className="flex items-center gap-1 text-[10px] text-gray-400 uppercase tracking-wide px-3">
+            Category <ColumnFilterBtn colKey="category" />
+          </div>
+          <div className="flex items-center gap-1 text-[10px] text-gray-400 uppercase tracking-wide px-3">
+            Type <ColumnFilterBtn colKey="spending_type" displayLabel={v => SPENDING_TYPE_LABELS[v] ?? v} />
+          </div>
+          {sourceAccounts.length > 0 && (
+            <div className="flex items-center gap-1 text-[10px] text-gray-400 uppercase tracking-wide px-3">
+              Account <ColumnFilterBtn colKey="account" />
+            </div>
+          )}
+          <div className="flex items-center gap-1 text-[10px] text-gray-400 uppercase tracking-wide px-3">
+            App <ColumnFilterBtn colKey="app_source" />
+          </div>
+          <div className="flex items-center gap-1 text-[10px] text-gray-400 uppercase tracking-wide px-3">
+            Mode <ColumnFilterBtn colKey="mode" />
+          </div>
+          <div className="text-[10px] text-gray-400 uppercase tracking-wide text-right px-3">Amount</div>
+        </div>
+
+        {loading ? (
+          <p className="text-gray-400 text-sm p-6">Loading...</p>
+        ) : filtered.length === 0 ? (
           <div className="text-center py-16 text-gray-400 text-sm">No transactions found.</div>
-        ) : filtered.map(t => {
+        ) : filtered.map((t, idx) => {
           const isSelected = selectedIds.has(t.id)
           const displayName = t.merchant?.trim() || t.categories?.name || '—'
-          const subLine = t.merchant?.trim() && t.categories?.name
-            ? t.categories.name
-            : null
-          // Extract app source (GPay / PhonePe / Paytm) and strip APP: + UTR: from displayed notes
           const appMatch = (t.notes ?? '').match(/APP:([^\s|]+)/)
           const appSource = appMatch?.[1] ?? null
           const displayNotes = (t.notes ?? '')
@@ -473,62 +655,86 @@ export default function Transactions() {
 
           return (
             <div key={t.id}
-              className={`bg-white border rounded-2xl px-4 py-3 flex items-center gap-3 shadow-sm hover:shadow-md transition-all cursor-pointer
-                ${isSelected ? 'border-[#7FA68A] bg-[#F2F8F4]' : 'border-gray-100'}`}
+              className={`flex items-center gap-3 px-4 py-3 cursor-pointer transition-colors border-b border-gray-50 last:border-0
+                ${isSelected ? 'bg-[#F2F8F4]' : idx % 2 === 0 ? 'bg-white hover:bg-gray-50' : 'bg-gray-50/50 hover:bg-gray-100/50'}`}
               onClick={() => toggleSelect(t.id)}
             >
               {/* Checkbox */}
-              <div className="flex-shrink-0" onClick={e => { e.stopPropagation(); toggleSelect(t.id) }}>
+              <div className="flex-shrink-0 w-6 flex items-center justify-center" onClick={e => { e.stopPropagation(); toggleSelect(t.id) }}>
                 {isSelected
                   ? <CheckSquare size={16} className="text-[#7FA68A]" />
                   : <Square size={16} className="text-gray-300" />}
               </div>
 
-              <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: CATEGORY_COLORS[t.categories?.name ?? ''] ?? '#E5E7EB' }} />
-
+              {/* Merchant + date + notes */}
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
-                  <span className="font-semibold text-gray-800 text-sm truncate">{displayName}</span>
+                  <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: CATEGORY_COLORS[t.categories?.name ?? ''] ?? '#E5E7EB' }} />
+                  <span className="font-medium text-gray-800 text-sm truncate">{displayName}</span>
                   <span className="text-xs text-gray-400 ml-auto flex-shrink-0">
                     {new Date(t.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
                   </span>
                 </div>
-                <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
-                  {subLine && (
-                    <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">{subLine}</span>
-                  )}
-                  {displayNotes && <p className="text-xs text-gray-400 truncate">{displayNotes}</p>}
+                {displayNotes && <p className="text-xs text-gray-400 truncate mt-0.5 pl-4">{displayNotes}</p>}
+              </div>
+
+              {/* Category */}
+              <div className="w-28 flex-shrink-0 px-3">
+                {t.categories?.name
+                  ? <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full truncate block text-center">{t.categories.name}</span>
+                  : <span className="text-xs text-gray-300 italic">—</span>
+                }
+              </div>
+
+              {/* Spending type */}
+              <div className="w-24 flex-shrink-0 px-3">
+                <span className={`text-xs px-2 py-0.5 rounded-full font-medium block text-center ${
+                  t.spending_type === 'necessary' ? 'bg-[#C8DDD0] text-[#7FA68A]'
+                  : t.spending_type === 'credit' ? 'bg-[#C4E8D5] text-green-600'
+                  : 'bg-[#F0CECE] text-red-400'
+                }`}>
+                  {SPENDING_TYPE_LABELS[t.spending_type] ?? t.spending_type}
+                </span>
+              </div>
+
+              {/* Account */}
+              {sourceAccounts.length > 0 && (
+                <div className="w-24 flex-shrink-0 px-3">
+                  {t.source_accounts
+                    ? <span className="text-xs px-2 py-0.5 rounded-full font-medium text-gray-600 block text-center truncate"
+                        style={{ background: t.source_accounts.color ?? '#E5E7EB' }}>
+                        {t.source_accounts.label}
+                      </span>
+                    : <span className="text-xs text-gray-300 italic text-center block">—</span>
+                  }
                 </div>
-                <div className="flex gap-1.5 mt-1 flex-wrap">
-                  <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-                    t.spending_type === 'necessary' ? 'bg-[#C8DDD0] text-[#7FA68A]'
-                    : t.spending_type === 'credit' ? 'bg-[#C4E8D5] text-green-600'
-                    : 'bg-[#F0CECE] text-red-400'
-                  }`}>
-                    {t.spending_type === 'necessary' ? 'Necessary' : t.spending_type === 'credit' ? 'Credit' : 'Discretionary'}
-                  </span>
-                  {t.source_accounts && (
-                    <span className="text-xs px-2 py-0.5 rounded-full font-medium text-gray-600"
-                      style={{ background: t.source_accounts.color ?? '#E5E7EB' }}>
-                      {t.source_accounts.label}
-                    </span>
-                  )}
-                  {appSource && (
-                    <span className="text-xs px-2 py-0.5 rounded-full text-gray-500"
+              )}
+
+              {/* App source */}
+              <div className="w-16 flex-shrink-0 px-3">
+                {appSource
+                  ? <span className="text-xs px-2 py-0.5 rounded-full text-gray-500 block text-center"
                       style={{ background: appSource === 'GPay' ? '#E8F0FE' : appSource === 'PhonePe' ? '#EDE7F6' : '#E3F2FD' }}>
                       {appSource}
                     </span>
-                  )}
-                  {t.payment_modes?.name && <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">{t.payment_modes.name}</span>}
-                  {t.platforms?.name && <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">{t.platforms.name}</span>}
-                </div>
+                  : <span className="text-xs text-gray-300 italic text-center block">—</span>
+                }
               </div>
 
-              <div className="flex items-center gap-2 flex-shrink-0" onClick={e => e.stopPropagation()}>
-                <span className={`font-light text-base ${t.spending_type === 'credit' ? 'text-green-600' : 'text-gray-800'}`} style={{ fontFamily: 'Georgia,serif' }}>
+              {/* Mode */}
+              <div className="w-16 flex-shrink-0 px-3">
+                {t.payment_modes?.name
+                  ? <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full block text-center truncate">{t.payment_modes.name}</span>
+                  : <span className="text-xs text-gray-300 italic text-center block">—</span>
+                }
+              </div>
+
+              {/* Amount + actions */}
+              <div className="flex items-center gap-2 flex-shrink-0 pl-3" onClick={e => e.stopPropagation()}>
+                <span className={`font-light text-base w-20 text-right ${t.spending_type === 'credit' ? 'text-green-600' : 'text-gray-800'}`} style={{ fontFamily: 'Georgia,serif' }}>
                   {t.spending_type === 'credit' ? '+' : ''}{fmt(Math.abs(t.amount))}
                 </span>
-                <button onClick={() => openEdit(t)} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-50 rounded-lg"><Edit2 size={13} /></button>
+                <button onClick={() => openEdit(t)} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg"><Edit2 size={13} /></button>
                 <button onClick={() => remove(t.id)} className="p-1.5 text-gray-400 hover:text-red-400 hover:bg-red-50 rounded-lg"><Trash2 size={13} /></button>
               </div>
             </div>
@@ -557,14 +763,25 @@ export default function Transactions() {
                   value={bulkSpendingType} onChange={e => setBulkSpendingType(e.target.value)}>
                   <option value="">— keep existing —</option>
                   <option value="necessary">Necessary</option>
-                  <option value="unnecessary">Unnecessary</option>
+                  <option value="unnecessary">Discretionary</option>
                   <option value="credit">Credit / Reimbursement</option>
                 </select>
               </div>
+              {sourceAccounts.length > 0 && (
+                <div>
+                  <label className="text-xs text-gray-500 mb-1 block">Account</label>
+                  <select className="w-full border border-gray-200 rounded-xl px-4 py-2.5 text-sm outline-none bg-white focus:border-[#7FA68A]"
+                    value={bulkAccountId} onChange={e => setBulkAccountId(e.target.value)}>
+                    <option value="">— keep existing —</option>
+                    <option value="__clear__">— clear account —</option>
+                    {sourceAccounts.map(a => <option key={a.id} value={a.id}>{a.label}</option>)}
+                  </select>
+                </div>
+              )}
             </div>
             <div className="flex gap-2 mt-5">
               <button onClick={() => setBulkEditOpen(false)} className="flex-1 border border-gray-200 rounded-xl py-2.5 text-sm text-gray-500 hover:bg-gray-50">Cancel</button>
-              <button onClick={bulkEdit} disabled={bulkEditSaving || (!bulkCategoryId && !bulkSpendingType)}
+              <button onClick={bulkEdit} disabled={bulkEditSaving || (!bulkCategoryId && !bulkSpendingType && bulkAccountId === '')}
                 className="flex-1 bg-[#7FA68A] text-white rounded-xl py-2.5 text-sm font-medium hover:bg-[#6d9478] disabled:opacity-40 transition-all">
                 {bulkEditSaving ? 'Saving…' : 'Apply'}
               </button>
@@ -625,7 +842,7 @@ export default function Transactions() {
                 <select className="border border-gray-200 rounded-xl px-4 py-2.5 text-sm outline-none bg-white"
                   value={form.spending_type} onChange={e => setForm(f => ({ ...f, spending_type: e.target.value }))}>
                   <option value="necessary">Necessary</option>
-                  <option value="unnecessary">Unnecessary</option>
+                  <option value="unnecessary">Discretionary</option>
                   <option value="credit">Credit / Reimbursement</option>
                 </select>
               </div>
