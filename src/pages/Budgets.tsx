@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../supabase'
-import { Edit2, AlertTriangle, CheckCircle, XCircle, Plus, Trash2, ChevronLeft, ChevronRight, CreditCard, Building2, Wallet, X, Check } from 'lucide-react'
+import { Edit2, AlertTriangle, CheckCircle, XCircle, Plus, Trash2, ChevronLeft, ChevronRight, CreditCard, Building2, Wallet, X, Check, Tag } from 'lucide-react'
 
 interface Category {
   id: string
@@ -22,6 +22,16 @@ interface SourceAccount {
   monthly_budget?: number | null
   credit_limit?: number | null
   spent?: number
+}
+
+interface TagBudgetItem {
+  id: string
+  name: string
+  color: string
+  budget: number | null
+  spent: number
+  txn_count: number
+  date_range: string
 }
 
 function fmt(n: number) {
@@ -59,6 +69,7 @@ const TYPE_ICONS: Record<string, React.ReactNode> = {
 export default function Budgets() {
   const [categories, setCategories] = useState<Category[]>([])
   const [accounts, setAccounts] = useState<SourceAccount[]>([])
+  const [tagBudgets, setTagBudgets] = useState<TagBudgetItem[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedMonth, setSelectedMonth] = useState(currentYM())
 
@@ -86,14 +97,17 @@ export default function Budgets() {
 
     const { data: { user } } = await supabase.auth.getUser()
 
-    const [{ data: cats }, { data: txns }, saRes] = await Promise.all([
+    const [{ data: cats }, { data: txns }, saRes, tagsRes] = await Promise.all([
       supabase.from('categories').select('*').order('name'),
       supabase.from('transactions')
-        .select('category_id, source_account_id, amount, spending_type')
+        .select('id, category_id, source_account_id, amount, spending_type, date')
         .gte('date', monthStart)
         .lte('date', monthEnd),
       user
         ? supabase.from('source_accounts').select('*').eq('user_id', user.id).order('label')
+        : Promise.resolve({ data: [] as any[] }),
+      user
+        ? supabase.from('tags').select('id, name, color, budget').eq('user_id', user.id).order('name')
         : Promise.resolve({ data: [] as any[] }),
     ])
 
@@ -101,8 +115,9 @@ export default function Budgets() {
     const grossMap: Record<string, number> = {}
     const creditMap: Record<string, number> = {}
     const acctSpendMap: Record<string, number> = {}
+    const txnIdSet = new Set((txns ?? []).map((t: any) => t.id))
 
-    txns?.forEach(t => {
+    txns?.forEach((t: any) => {
       // Category spend
       if (t.category_id) {
         if (t.spending_type === 'credit' || t.amount < 0) {
@@ -128,6 +143,36 @@ export default function Budgets() {
       ...a,
       spent: acctSpendMap[a.id] ?? 0,
     })))
+
+    // Tags: fetch transaction_tags for transactions within this month
+    if ((tagsRes.data ?? []).length > 0 && txnIdSet.size > 0) {
+      const { data: ttData } = await supabase
+        .from('transaction_tags')
+        .select('tag_id, transactions(id, amount, spending_type, date)')
+
+      const tagSpendMap: Record<string, { spent: number; count: number; minDate: string; maxDate: string }> = {}
+      ttData?.forEach((row: any) => {
+        const t = row.transactions
+        if (!t || !txnIdSet.has(t.id)) return
+        const id = row.tag_id
+        if (!tagSpendMap[id]) tagSpendMap[id] = { spent: 0, count: 0, minDate: t.date, maxDate: t.date }
+        tagSpendMap[id].count++
+        if (t.spending_type !== 'credit' && t.amount > 0) tagSpendMap[id].spent += t.amount
+        if (t.date < tagSpendMap[id].minDate) tagSpendMap[id].minDate = t.date
+        if (t.date > tagSpendMap[id].maxDate) tagSpendMap[id].maxDate = t.date
+      })
+
+      const fmtDate = (d: string) => new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
+      setTagBudgets((tagsRes.data ?? []).map((tag: any) => {
+        const stats = tagSpendMap[tag.id]
+        const date_range = stats
+          ? stats.minDate === stats.maxDate ? fmtDate(stats.minDate) : `${fmtDate(stats.minDate)} – ${fmtDate(stats.maxDate)}`
+          : ''
+        return { ...tag, spent: stats?.spent ?? 0, txn_count: stats?.count ?? 0, date_range }
+      }))
+    } else {
+      setTagBudgets((tagsRes.data ?? []).map((tag: any) => ({ ...tag, spent: 0, txn_count: 0, date_range: '' })))
+    }
 
     setLoading(false)
   }
@@ -420,6 +465,70 @@ export default function Budgets() {
             })}
           </div>
         </>
+      )}
+
+      {/* ── Tag Budgets ── */}
+      {tagBudgets.length > 0 && (
+        <div className="mt-10">
+          <h2 className="text-base font-semibold text-gray-700 mb-1">Tag Budgets</h2>
+          <p className="text-xs text-gray-400 mb-4">Spend rolled up by tag for {ymLabel(selectedMonth)}.</p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {tagBudgets.map(tag => {
+              const hasBudget = (tag.budget ?? 0) > 0
+              const pct = hasBudget ? Math.min((tag.spent / tag.budget!) * 100, 100) : 0
+              const isOver = hasBudget && tag.spent > tag.budget!
+              const isWarn = hasBudget && pct >= 80 && !isOver
+              const barColor = isOver ? '#F87171' : isWarn ? '#FBBF24' : '#7FA68A'
+
+              return (
+                <div key={tag.id} className={`bg-white border rounded-2xl p-4 shadow-sm transition-all hover:shadow-md ${isOver ? 'border-red-200' : isWarn ? 'border-amber-200' : 'border-gray-100'}`}>
+                  <div className="flex items-center gap-2.5 mb-3">
+                    <div className="w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0"
+                      style={{ background: tag.color ?? '#C8DDD0' }}>
+                      <Tag size={14} className="text-gray-600" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-semibold text-gray-800 text-sm">{tag.name}</div>
+                      {tag.date_range && <div className="text-xs text-gray-400 mt-0.5">{tag.date_range}</div>}
+                    </div>
+                    {hasBudget && (
+                      isOver ? <XCircle size={16} className="text-red-400" /> :
+                      isWarn ? <AlertTriangle size={16} className="text-amber-400" /> :
+                      <CheckCircle size={16} className="text-[#7FA68A]" />
+                    )}
+                  </div>
+                  <div className="flex items-end justify-between mb-2">
+                    <div>
+                      <div className="text-xs text-gray-400">Spent</div>
+                      <div className="text-lg font-light" style={{ fontFamily: 'Georgia,serif', color: isOver ? '#F87171' : '#374151' }}>
+                        {fmt(tag.spent)}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-xs text-gray-400">{tag.txn_count} txn{tag.txn_count !== 1 ? 's' : ''}</div>
+                      {hasBudget && (
+                        <div className="text-sm font-light text-gray-500">Budget {fmt(tag.budget!)}</div>
+                      )}
+                      {!hasBudget && tag.txn_count === 0 && (
+                        <div className="text-xs text-gray-300 italic">No transactions</div>
+                      )}
+                    </div>
+                  </div>
+                  {hasBudget && (
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                        <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: barColor }} />
+                      </div>
+                      <span className="text-xs text-gray-400 w-8 text-right">{Math.round(pct)}%</span>
+                    </div>
+                  )}
+                  {isOver && <div className="mt-2 text-xs bg-red-50 text-red-400 rounded-lg px-3 py-1.5">⚠️ Over by {fmt(tag.spent - tag.budget!)}</div>}
+                  {isWarn && <div className="mt-2 text-xs bg-amber-50 text-amber-500 rounded-lg px-3 py-1.5">⚡ 80%+ of tag budget used</div>}
+                </div>
+              )
+            })}
+          </div>
+        </div>
       )}
 
       {/* Edit category modal */}

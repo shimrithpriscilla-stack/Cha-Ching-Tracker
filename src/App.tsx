@@ -5,6 +5,7 @@ import AppLayout from './components/AppLayout'
 import Income from './pages/Income'
 import Transactions from './pages/Transactions'
 import Budgets from './pages/Budgets'
+import Tags from './pages/Tags'
 import Analysis from './pages/Analysis'
 import IncomeVsSpend from './pages/IncomeVsSpend'
 import Import from './pages/Import'
@@ -14,6 +15,7 @@ const PAGES: Record<string, React.ReactElement> = {
   income: <Income />,
   transactions: <Transactions />,
   budgets: <Budgets />,
+  tags: <Tags />,
   analysis: <Analysis />,
   compare: <IncomeVsSpend />,
   import: <Import />,

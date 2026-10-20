@@ -1,10 +1,11 @@
 import { useState } from 'react'
-import { IndianRupee, Receipt, Layers, PieChart, BarChart3, Upload, Settings } from 'lucide-react'
+import { IndianRupee, Receipt, Layers, PieChart, BarChart3, Upload, Settings, Tag } from 'lucide-react'
 
 const navItems = [
   { id: 'income', label: 'Income', icon: IndianRupee },
   { id: 'transactions', label: 'Transactions', icon: Receipt },
   { id: 'budgets', label: 'Budgets', icon: Layers },
+  { id: 'tags', label: 'Tags', icon: Tag },
   { id: 'analysis', label: 'Analysis', icon: PieChart },
   { id: 'compare', label: 'Compare', icon: BarChart3 },
   { id: 'import', label: 'Import', icon: Upload },

@@ -1,6 +1,12 @@
 import { useState, useEffect, useRef } from 'react'
 import { supabase } from '../supabase'
-import { Plus, Search, Edit2, Trash2, ArrowUpDown, CheckSquare, Square, Download, ChevronDown, X, Filter } from 'lucide-react'
+import { Plus, Search, Edit2, Trash2, ArrowUpDown, CheckSquare, Square, Download, ChevronDown, X, Filter, Tag } from 'lucide-react'
+
+interface TagItem {
+  id: string
+  name: string
+  color: string
+}
 
 interface Transaction {
   id: string
@@ -13,6 +19,7 @@ interface Transaction {
   payment_modes?: { name: string }
   platforms?: { name: string }
   source_accounts?: { id: string; label: string; color: string | null; account_type: string } | null
+  transaction_tags?: { tags: TagItem }[]
 }
 
 interface DropdownItem { id: string; name: string }
@@ -43,8 +50,7 @@ const CATEGORY_COLORS: Record<string, string> = {
 
 const BLANK = '__blank__'
 
-// Maps a column key to how we extract a cell value from a transaction
-type ColKey = 'category' | 'spending_type' | 'account' | 'app_source' | 'mode'
+type ColKey = 'category' | 'spending_type' | 'account' | 'app_source' | 'mode' | 'tag'
 
 function getColValue(colKey: ColKey, t: Transaction): string {
   if (colKey === 'category') return t.categories?.name ?? ''
@@ -55,6 +61,10 @@ function getColValue(colKey: ColKey, t: Transaction): string {
     return m?.[1] ?? ''
   }
   if (colKey === 'mode') return t.payment_modes?.name ?? ''
+  if (colKey === 'tag') {
+    const tags = (t.transaction_tags ?? []).map(tt => tt.tags?.name).filter(Boolean)
+    return tags.join(',')
+  }
   return ''
 }
 
@@ -64,6 +74,7 @@ const COL_LABELS: Record<ColKey, string> = {
   account: 'Account',
   app_source: 'App',
   mode: 'Mode',
+  tag: 'Tag',
 }
 
 const SPENDING_TYPE_LABELS: Record<string, string> = {
@@ -74,6 +85,7 @@ const SPENDING_TYPE_LABELS: Record<string, string> = {
 
 export default function Transactions() {
   const [txns, setTxns] = useState<Transaction[]>([])
+  const [allTags, setAllTags] = useState<TagItem[]>([])
   const [categories, setCategories] = useState<DropdownItem[]>([])
   const [modes, setModes] = useState<DropdownItem[]>([])
   const [platforms, setPlatforms] = useState<DropdownItem[]>([])
@@ -82,11 +94,9 @@ export default function Transactions() {
   const [period, setPeriod] = useState<Period>('month')
   const [search, setSearch] = useState('')
 
-  // Excel-style column filters: Map<colKey, Set<value | '__blank__'>>
   const [columnFilters, setColumnFilters] = useState<Map<ColKey, Set<string>>>(new Map())
   const [openFilterCol, setOpenFilterCol] = useState<ColKey | null>(null)
 
-  // Date / amount range (kept as dedicated inputs since they're not value-list filters)
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [amtMin, setAmtMin] = useState('')
@@ -104,30 +114,46 @@ export default function Transactions() {
     amount: '', category_id: '', mode_id: '', platform_id: '',
     spending_type: 'necessary', notes: '', merchant: ''
   })
+
+  // Tags for the add/edit form
+  const [formTagIds, setFormTagIds] = useState<Set<string>>(new Set())
+  const [showTagPicker, setShowTagPicker] = useState(false)
+  const tagPickerRef = useRef<HTMLDivElement>(null)
+
+  // Inline tag editor per row
+  const [inlineTagTxnId, setInlineTagTxnId] = useState<string | null>(null)
+  const [inlineTagIds, setInlineTagIds] = useState<Set<string>>(new Set())
+  const [inlineTagSaving, setInlineTagSaving] = useState(false)
+  const inlineTagRef = useRef<HTMLDivElement>(null)
+
   // Bulk select
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState(false)
   const [bulkDeleting, setBulkDeleting] = useState(false)
+
   // Bulk edit
   const [bulkEditOpen, setBulkEditOpen] = useState(false)
   const [bulkEditSaving, setBulkEditSaving] = useState(false)
   const [bulkCategoryId, setBulkCategoryId] = useState('')
   const [bulkSpendingType, setBulkSpendingType] = useState('')
   const [bulkAccountId, setBulkAccountId] = useState('')
+  const [bulkTagIds, setBulkTagIds] = useState<Set<string>>(new Set())
+  const [bulkTagMode, setBulkTagMode] = useState<'add' | 'replace' | 'remove'>('add')
 
   async function load() {
     const { data: { user } } = await supabase.auth.getUser()
-    const [c, m, p, sa] = await Promise.all([
+    const [c, m, p, sa, tagsRes] = await Promise.all([
       supabase.from('categories').select('id, name').order('name'),
       supabase.from('payment_modes').select('id, name').order('name'),
       supabase.from('platforms').select('id, name').order('name'),
       user ? supabase.from('source_accounts').select('id, label, color').eq('user_id', user.id).order('label') : Promise.resolve({ data: [] }),
+      user ? supabase.from('tags').select('id, name, color').eq('user_id', user.id).order('name') : Promise.resolve({ data: [] }),
     ])
 
     let txnData: Transaction[] = []
     const withJoin = await supabase
       .from('transactions')
-      .select('*, categories(name), payment_modes(name), platforms(name), source_accounts(id, label, color, account_type)')
+      .select('*, categories(name), payment_modes(name), platforms(name), source_accounts(id, label, color, account_type), transaction_tags(tags(id, name, color))')
       .gte('date', getPeriodStart(period))
       .order('date', { ascending: false })
     if (!withJoin.error) {
@@ -142,6 +168,7 @@ export default function Transactions() {
     }
 
     setTxns(txnData)
+    setAllTags((tagsRes as any).data ?? [])
     setCategories(c.data ?? [])
     setModes(m.data ?? [])
     setPlatforms(p.data ?? [])
@@ -152,8 +179,44 @@ export default function Transactions() {
 
   useEffect(() => { load() }, [period])
 
+  // Close inline tag picker on outside click
+  useEffect(() => {
+    if (!inlineTagTxnId) return
+    function handleClick(e: MouseEvent) {
+      if (inlineTagRef.current && !inlineTagRef.current.contains(e.target as Node)) {
+        setInlineTagTxnId(null)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [inlineTagTxnId])
+
+  // Close form tag picker on outside click
+  useEffect(() => {
+    if (!showTagPicker) return
+    function handleClick(e: MouseEvent) {
+      if (tagPickerRef.current && !tagPickerRef.current.contains(e.target as Node)) {
+        setShowTagPicker(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [showTagPicker])
+
   // --- Column filter helpers ---
   function colUniqueValues(colKey: ColKey): string[] {
+    if (colKey === 'tag') {
+      const seen = new Set<string>()
+      let hasBlank = false
+      for (const t of txns) {
+        const tags = (t.transaction_tags ?? []).map(tt => tt.tags?.name).filter(Boolean)
+        if (tags.length === 0) hasBlank = true
+        else tags.forEach(tag => seen.add(tag!))
+      }
+      const sorted = [...seen].sort()
+      if (hasBlank) sorted.push(BLANK)
+      return sorted
+    }
     const seen = new Set<string>()
     let hasBlank = false
     for (const t of txns) {
@@ -190,30 +253,39 @@ export default function Transactions() {
     setSearch('')
   }
 
-  // --- Filtered rows (AND across all column filters + date/amount/search) ---
+  // --- Filtered rows ---
   const filtered = txns
     .filter(t => {
-      // Column filters (AND logic)
       for (const [colKey, allowed] of columnFilters) {
         if (allowed.size === 0) continue
-        const v = getColValue(colKey, t)
-        const matches = v === '' ? allowed.has(BLANK) : allowed.has(v)
-        if (!matches) return false
+        if (colKey === 'tag') {
+          const txnTags = (t.transaction_tags ?? []).map(tt => tt.tags?.name).filter(Boolean) as string[]
+          const hasBlankFilter = allowed.has(BLANK)
+          if (txnTags.length === 0) {
+            if (!hasBlankFilter) return false
+          } else {
+            const hasMatch = txnTags.some(tag => allowed.has(tag))
+            if (!hasMatch && !(hasBlankFilter && txnTags.length === 0)) return false
+          }
+        } else {
+          const v = getColValue(colKey, t)
+          const matches = v === '' ? allowed.has(BLANK) : allowed.has(v)
+          if (!matches) return false
+        }
       }
-      // Date range
       if (dateFrom && t.date < dateFrom) return false
       if (dateTo && t.date > dateTo) return false
-      // Amount range
       const absAmt = Math.abs(t.amount)
       if (amtMin && absAmt < parseFloat(amtMin)) return false
       if (amtMax && absAmt > parseFloat(amtMax)) return false
-      // Search
       if (search) {
         const q = search.toLowerCase()
+        const txnTagNames = (t.transaction_tags ?? []).map(tt => tt.tags?.name ?? '').join(' ')
         if (
           !(t.merchant ?? '').toLowerCase().includes(q) &&
           !(t.notes ?? '').toLowerCase().includes(q) &&
-          !(t.categories?.name ?? '').toLowerCase().includes(q)
+          !(t.categories?.name ?? '').toLowerCase().includes(q) &&
+          !txnTagNames.toLowerCase().includes(q)
         ) return false
       }
       return true
@@ -278,7 +350,6 @@ export default function Transactions() {
         </button>
         {isOpen && (
           <div className="absolute left-0 top-full mt-1 z-50 bg-white border border-gray-200 rounded-xl shadow-lg min-w-44 py-1.5">
-            {/* Select All */}
             <label className="flex items-center gap-2 px-3 py-1.5 hover:bg-gray-50 cursor-pointer border-b border-gray-100 mb-1">
               <input
                 type="checkbox"
@@ -302,7 +373,6 @@ export default function Transactions() {
                 </label>
               ))}
             </div>
-            {/* Blanks only shortcut */}
             {allVals.includes(BLANK) && (
               <div className="border-t border-gray-100 mt-1 pt-1">
                 <button
@@ -351,11 +421,28 @@ export default function Transactions() {
       notes: rebuiltNotes,
       source_account_id: form_source_account_id || null,
     }
-    if (editId) await supabase.from('transactions').update(payload).eq('id', editId)
-    else await supabase.from('transactions').insert(payload)
+
+    let savedId = editId
+    if (editId) {
+      await supabase.from('transactions').update(payload).eq('id', editId)
+    } else {
+      const { data } = await supabase.from('transactions').insert(payload).select('id').single()
+      savedId = data?.id ?? null
+    }
+
+    // Save tags
+    if (savedId) {
+      await supabase.from('transaction_tags').delete().eq('transaction_id', savedId)
+      if (formTagIds.size > 0) {
+        const tagRows = [...formTagIds].map(tag_id => ({ transaction_id: savedId, tag_id }))
+        await supabase.from('transaction_tags').insert(tagRows)
+      }
+    }
+
     setShowForm(false); setEditId(null)
     setFormSourceAccountId('')
     setFormAppSource('')
+    setFormTagIds(new Set())
     setForm({ date: new Date().toISOString().slice(0, 10), amount: '', category_id: '', mode_id: '', platform_id: '', spending_type: 'necessary', notes: '', merchant: '' })
     load()
   }
@@ -386,11 +473,39 @@ export default function Transactions() {
     if (Object.keys(updates).length > 0) {
       await supabase.from('transactions').update(updates).in('id', ids)
     }
+    // Bulk tag operation
+    if (bulkTagIds.size > 0) {
+      if (bulkTagMode === 'replace') {
+        await supabase.from('transaction_tags').delete().in('transaction_id', ids)
+      } else if (bulkTagMode === 'remove') {
+        await supabase.from('transaction_tags').delete().in('transaction_id', ids).in('tag_id', [...bulkTagIds])
+      }
+      if (bulkTagMode !== 'remove') {
+        for (const txnId of ids) {
+          const tagRows = [...bulkTagIds].map(tag_id => ({ transaction_id: txnId, tag_id }))
+          await supabase.from('transaction_tags').upsert(tagRows, { onConflict: 'transaction_id,tag_id', ignoreDuplicates: true })
+        }
+      }
+    }
     setBulkEditSaving(false)
     setBulkEditOpen(false)
     setBulkCategoryId('')
     setBulkSpendingType('')
     setBulkAccountId('')
+    setBulkTagIds(new Set())
+    load()
+  }
+
+  // Inline tag save
+  async function saveInlineTags(txnId: string) {
+    setInlineTagSaving(true)
+    await supabase.from('transaction_tags').delete().eq('transaction_id', txnId)
+    if (inlineTagIds.size > 0) {
+      const tagRows = [...inlineTagIds].map(tag_id => ({ transaction_id: txnId, tag_id }))
+      await supabase.from('transaction_tags').insert(tagRows)
+    }
+    setInlineTagSaving(false)
+    setInlineTagTxnId(null)
     load()
   }
 
@@ -416,7 +531,15 @@ export default function Transactions() {
     setFormSourceAccountId((t as any).source_account_id ?? (t.source_accounts?.id ?? ''))
     const appMatch = (t.notes ?? '').match(/APP:([^\s|]+)/)
     setFormAppSource(appMatch?.[1] ?? '')
+    const existingTagIds = new Set((t.transaction_tags ?? []).map(tt => tt.tags?.id).filter(Boolean) as string[])
+    setFormTagIds(existingTagIds)
     setShowForm(true)
+  }
+
+  function openInlineTag(t: Transaction) {
+    const existingTagIds = new Set((t.transaction_tags ?? []).map(tt => tt.tags?.id).filter(Boolean) as string[])
+    setInlineTagIds(existingTagIds)
+    setInlineTagTxnId(t.id)
   }
 
   function toggleSort(field: SortField) {
@@ -425,15 +548,16 @@ export default function Transactions() {
   }
 
   function exportCSV() {
-    const header = 'Date,Merchant,Amount,Spending Type,Category,Mode,Platform,Account,Notes'
+    const header = 'Date,Merchant,Amount,Spending Type,Category,Mode,Platform,Account,Tags,Notes'
     const rows = filtered.map(t => {
       const displayNotes = (t.notes ?? '').replace(/APP:[^\s|]+\s*\|?\s*/g, '').replace(/UTR:[^\s|]+\s*\|?\s*/g, '').trim().replace(/^\||\|$/g, '').trim()
+      const tags = (t.transaction_tags ?? []).map(tt => tt.tags?.name).filter(Boolean).join('; ')
       const esc = (s: string) => `"${(s ?? '').replace(/"/g, '""')}"`
       return [
         t.date, esc(t.merchant ?? ''), t.amount,
         esc(t.spending_type), esc(t.categories?.name ?? ''),
         esc(t.payment_modes?.name ?? ''), esc(t.platforms?.name ?? ''),
-        esc(t.source_accounts?.label ?? ''), esc(displayNotes)
+        esc(t.source_accounts?.label ?? ''), esc(tags), esc(displayNotes)
       ].join(',')
     })
     const csv = [header, ...rows].join('\n')
@@ -449,7 +573,6 @@ export default function Transactions() {
     { key: 'month', label: 'This Month' }, { key: '3m', label: '3 Months' }, { key: 'all', label: 'All Time' }
   ]
 
-  // Active filter summary pill display value
   function filterDisplayVal(colKey: ColKey, v: string) {
     if (v === BLANK) return '(Blanks)'
     if (colKey === 'spending_type') return SPENDING_TYPE_LABELS[v] ?? v
@@ -468,7 +591,7 @@ export default function Transactions() {
             className="flex items-center gap-1.5 border border-gray-200 text-gray-500 px-3 py-2 rounded-xl text-sm hover:bg-gray-50 transition-all">
             <Download size={14} /> CSV
           </button>
-          <button onClick={() => { setShowForm(true); setEditId(null) }}
+          <button onClick={() => { setShowForm(true); setEditId(null); setFormTagIds(new Set()) }}
             className="flex items-center gap-2 bg-[#7FA68A] text-white px-4 py-2 rounded-xl text-sm font-medium hover:bg-[#6d9478] transition-all">
             <Plus size={15} /> Add
           </button>
@@ -492,7 +615,7 @@ export default function Transactions() {
           <div className="flex-1 min-w-48 relative">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
             <input className="w-full border border-gray-200 rounded-xl pl-9 pr-4 py-2 text-sm outline-none focus:border-[#7FA68A]"
-              placeholder="Search merchant, notes, category…" value={search} onChange={e => setSearch(e.target.value)} />
+              placeholder="Search merchant, notes, category, tags…" value={search} onChange={e => setSearch(e.target.value)} />
           </div>
           <button
             onClick={() => setShowMoreFilters(v => !v)}
@@ -599,7 +722,7 @@ export default function Transactions() {
           <span className="text-sm text-red-500 font-medium flex-1">{selectedIds.size} selected</span>
           <button onClick={() => setSelectedIds(new Set())} className="text-xs text-gray-400 hover:text-gray-600">Clear</button>
           <button
-            onClick={() => { setBulkCategoryId(''); setBulkSpendingType(''); setBulkAccountId(''); setBulkEditOpen(true) }}
+            onClick={() => { setBulkCategoryId(''); setBulkSpendingType(''); setBulkAccountId(''); setBulkTagIds(new Set()); setBulkTagMode('add'); setBulkEditOpen(true) }}
             className="flex items-center gap-1.5 bg-[#7FA68A] text-white px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-[#6d9478] transition-all"
           >
             <Edit2 size={12} /> Edit {selectedIds.size}
@@ -652,6 +775,8 @@ export default function Transactions() {
             .replace(/APP:[^\s|]+\s*\|?\s*/g, '')
             .replace(/UTR:[^\s|]+\s*\|?\s*/g, '')
             .trim().replace(/^\||\|$/g, '').trim()
+          const txnTags = (t.transaction_tags ?? []).map(tt => tt.tags).filter(Boolean) as TagItem[]
+          const isInlineTagOpen = inlineTagTxnId === t.id
 
           return (
             <div key={t.id}
@@ -666,7 +791,7 @@ export default function Transactions() {
                   : <Square size={16} className="text-gray-300" />}
               </div>
 
-              {/* Merchant + date + notes */}
+              {/* Merchant + date + notes + tags */}
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
                   <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: CATEGORY_COLORS[t.categories?.name ?? ''] ?? '#E5E7EB' }} />
@@ -676,6 +801,70 @@ export default function Transactions() {
                   </span>
                 </div>
                 {displayNotes && <p className="text-xs text-gray-400 truncate mt-0.5 pl-4">{displayNotes}</p>}
+                {/* Tags row */}
+                <div className="flex items-center gap-1 mt-1 pl-4 flex-wrap" onClick={e => e.stopPropagation()}>
+                  {txnTags.map(tag => (
+                    <span key={tag.id} className="text-xs px-2 py-0.5 rounded-full text-gray-600 flex items-center gap-1"
+                      style={{ background: tag.color ?? '#C8DDD0' }}>
+                      <Tag size={9} />
+                      {tag.name}
+                    </span>
+                  ))}
+                  {/* Inline tag button */}
+                  <div className="relative" ref={isInlineTagOpen ? inlineTagRef : undefined}>
+                    <button
+                      onClick={e => { e.stopPropagation(); openInlineTag(t) }}
+                      className="text-xs text-gray-300 hover:text-[#7FA68A] flex items-center gap-0.5 transition-colors"
+                      title="Add/edit tags"
+                    >
+                      <Tag size={10} />
+                      {txnTags.length === 0 ? <span className="text-[10px]">tag</span> : null}
+                    </button>
+                    {isInlineTagOpen && allTags.length > 0 && (
+                      <div className="absolute left-0 top-full mt-1 z-50 bg-white border border-gray-200 rounded-xl shadow-lg min-w-44 py-1.5">
+                        <div className="px-3 py-1 text-[10px] text-gray-400 uppercase tracking-wide border-b border-gray-100 mb-1">
+                          Tags
+                        </div>
+                        <div className="max-h-48 overflow-y-auto">
+                          {allTags.map(tag => (
+                            <label key={tag.id} className="flex items-center gap-2 px-3 py-1.5 hover:bg-gray-50 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={inlineTagIds.has(tag.id)}
+                                onChange={() => {
+                                  setInlineTagIds(prev => {
+                                    const next = new Set(prev)
+                                    if (next.has(tag.id)) next.delete(tag.id); else next.add(tag.id)
+                                    return next
+                                  })
+                                }}
+                                className="rounded accent-[#7FA68A]"
+                              />
+                              <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ background: tag.color ?? '#C8DDD0' }} />
+                              <span className="text-xs text-gray-700">{tag.name}</span>
+                            </label>
+                          ))}
+                        </div>
+                        <div className="border-t border-gray-100 mt-1 pt-1 px-2 flex gap-2">
+                          <button
+                            onClick={() => setInlineTagTxnId(null)}
+                            className="flex-1 text-xs text-gray-400 py-1.5 rounded-lg hover:bg-gray-50"
+                          >Cancel</button>
+                          <button
+                            onClick={() => saveInlineTags(t.id)}
+                            disabled={inlineTagSaving}
+                            className="flex-1 text-xs bg-[#7FA68A] text-white py-1.5 rounded-lg hover:bg-[#6d9478] disabled:opacity-40"
+                          >{inlineTagSaving ? '…' : 'Save'}</button>
+                        </div>
+                      </div>
+                    )}
+                    {isInlineTagOpen && allTags.length === 0 && (
+                      <div className="absolute left-0 top-full mt-1 z-50 bg-white border border-gray-200 rounded-xl shadow-lg min-w-44 p-3">
+                        <p className="text-xs text-gray-400">No tags yet. Create them in the <strong>Tags</strong> page.</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
 
               {/* Category */}
@@ -745,7 +934,7 @@ export default function Transactions() {
       {/* Bulk edit modal */}
       {bulkEditOpen && (
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-xl">
+          <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-xl max-h-[90vh] overflow-y-auto">
             <h2 className="text-lg font-light text-gray-800 mb-1" style={{ fontFamily: 'Georgia,serif' }}>Edit {selectedIds.size} transactions</h2>
             <p className="text-xs text-gray-400 mb-5">Only filled fields will be updated. Leave blank to keep existing values.</p>
             <div className="flex flex-col gap-3">
@@ -778,10 +967,47 @@ export default function Transactions() {
                   </select>
                 </div>
               )}
+              {allTags.length > 0 && (
+                <div>
+                  <label className="text-xs text-gray-500 mb-1 block">Tags</label>
+                  <div className="flex flex-wrap gap-1.5 mb-2">
+                    {allTags.map(tag => (
+                      <button
+                        key={tag.id}
+                        type="button"
+                        onClick={() => setBulkTagIds(prev => {
+                          const next = new Set(prev)
+                          if (next.has(tag.id)) next.delete(tag.id); else next.add(tag.id)
+                          return next
+                        })}
+                        className={`text-xs px-2.5 py-1 rounded-full flex items-center gap-1 border transition-all ${bulkTagIds.has(tag.id) ? 'border-[#7FA68A] text-gray-700' : 'border-transparent text-gray-500'}`}
+                        style={{ background: tag.color ?? '#C8DDD0' }}
+                      >
+                        {bulkTagIds.has(tag.id) && <span>✓</span>}
+                        {tag.name}
+                      </button>
+                    ))}
+                  </div>
+                  {bulkTagIds.size > 0 && (
+                    <div className="flex gap-2">
+                      {(['add', 'replace', 'remove'] as const).map(mode => (
+                        <button
+                          key={mode}
+                          type="button"
+                          onClick={() => setBulkTagMode(mode)}
+                          className={`flex-1 text-xs py-1.5 rounded-lg border transition-all ${bulkTagMode === mode ? 'bg-[#7FA68A] text-white border-[#7FA68A]' : 'border-gray-200 text-gray-500'}`}
+                        >
+                          {mode === 'add' ? '+ Add' : mode === 'replace' ? '↺ Replace all' : '− Remove'}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
             <div className="flex gap-2 mt-5">
               <button onClick={() => setBulkEditOpen(false)} className="flex-1 border border-gray-200 rounded-xl py-2.5 text-sm text-gray-500 hover:bg-gray-50">Cancel</button>
-              <button onClick={bulkEdit} disabled={bulkEditSaving || (!bulkCategoryId && !bulkSpendingType && bulkAccountId === '')}
+              <button onClick={bulkEdit} disabled={bulkEditSaving || (!bulkCategoryId && !bulkSpendingType && bulkAccountId === '' && bulkTagIds.size === 0)}
                 className="flex-1 bg-[#7FA68A] text-white rounded-xl py-2.5 text-sm font-medium hover:bg-[#6d9478] disabled:opacity-40 transition-all">
                 {bulkEditSaving ? 'Saving…' : 'Apply'}
               </button>
@@ -810,7 +1036,7 @@ export default function Transactions() {
       {/* Add / Edit modal */}
       {showForm && (
         <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-3xl p-6 w-full max-w-md shadow-xl">
+          <div className="bg-white rounded-3xl p-6 w-full max-w-md shadow-xl max-h-[90vh] overflow-y-auto">
             <h2 className="text-lg font-light text-gray-800 mb-4" style={{ fontFamily: 'Georgia,serif' }}>{editId ? 'Edit Transaction' : 'Add Transaction'}</h2>
             <div className="flex flex-col gap-3">
               <div className="grid grid-cols-2 gap-3">
@@ -864,9 +1090,35 @@ export default function Transactions() {
                   <option value="Paytm">Paytm</option>
                 </select>
               </div>
+
+              {/* Tags picker in form */}
+              {allTags.length > 0 && (
+                <div>
+                  <label className="text-xs text-gray-500 mb-1.5 block">Tags <span className="text-gray-300">(optional)</span></label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {allTags.map(tag => (
+                      <button
+                        key={tag.id}
+                        type="button"
+                        onClick={() => setFormTagIds(prev => {
+                          const next = new Set(prev)
+                          if (next.has(tag.id)) next.delete(tag.id); else next.add(tag.id)
+                          return next
+                        })}
+                        className={`text-xs px-2.5 py-1 rounded-full flex items-center gap-1 border transition-all ${formTagIds.has(tag.id) ? 'border-[#7FA68A] text-gray-700' : 'border-transparent text-gray-500 opacity-70'}`}
+                        style={{ background: tag.color ?? '#C8DDD0' }}
+                      >
+                        {formTagIds.has(tag.id) && <span>✓</span>}
+                        <Tag size={9} />
+                        {tag.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
             <div className="flex gap-2 mt-4">
-              <button onClick={() => { setShowForm(false); setEditId(null); setFormSourceAccountId(''); setFormAppSource('') }} className="flex-1 border border-gray-200 rounded-xl py-2.5 text-sm text-gray-500 hover:bg-gray-50">Cancel</button>
+              <button onClick={() => { setShowForm(false); setEditId(null); setFormSourceAccountId(''); setFormAppSource(''); setFormTagIds(new Set()) }} className="flex-1 border border-gray-200 rounded-xl py-2.5 text-sm text-gray-500 hover:bg-gray-50">Cancel</button>
               <button onClick={save} className="flex-1 bg-[#7FA68A] text-white rounded-xl py-2.5 text-sm font-medium hover:bg-[#6d9478]">{editId ? 'Save' : 'Add'}</button>
             </div>
           </div>
