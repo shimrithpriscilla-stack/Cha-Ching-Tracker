@@ -29,10 +29,12 @@ interface ParsedRow {
   category_id: string
   spending_type: 'necessary' | 'unnecessary' | 'credit'
   selected: boolean
+  tag_ids?: string[]
 }
 
 interface Category { id: string; name: string }
 interface PaymentMode { id: string; name: string }
+interface TagItem { id: string; name: string; color: string }
 
 type SortField = 'date' | 'amount'
 type SortDir = 'asc' | 'desc'
@@ -583,6 +585,7 @@ interface ColWidths {
   notes: number
   amount: number
   category: number
+  tags: number
   type: number
   source: number
   account: number
@@ -597,6 +600,7 @@ const DEFAULT_COL_WIDTHS: ColWidths = {
   notes: 160,
   amount: 110,
   category: 170,
+  tags: 160,
   type: 130,
   source: 100,
   account: 120,
@@ -718,6 +722,10 @@ export default function Import() {
   // Hide duplicates toggle — when true, hides all rows marked as hard or soft duplicate
   const [hideDuplicates, setHideDuplicates] = useState(false)
 
+  // Tags state
+  const [allTags, setAllTags] = useState<TagItem[]>([])
+  const [openTagRow, setOpenTagRow] = useState<string | null>(null)
+
   // Bulk edit state — values to apply to all selected visible rows
   const [bulkCategory, setBulkCategory] = useState('')
   const [bulkSpendingType, setBulkSpendingType] = useState('')
@@ -725,6 +733,8 @@ export default function Import() {
   const [bulkSource, setBulkSource] = useState('')
   const [bulkType, setBulkType] = useState('')
   const [bulkDate, setBulkDate] = useState('')
+  const [bulkTagIds, setBulkTagIds] = useState<Set<string>>(new Set())
+  const [openBulkTagDropdown, setOpenBulkTagDropdown] = useState(false)
 
   // Column widths — persisted to localStorage
   const [colWidths, setColWidths] = useState<ColWidths>(() => loadColWidths())
@@ -755,7 +765,7 @@ export default function Import() {
     })
   }, [])
 
-  // Load categories from DB if rows were restored from draft (so dropdowns work)
+  // Load categories + tags from DB if rows were restored from draft (so dropdowns work)
   useEffect(() => {
     if (rows.length > 0 && categories.length === 0) {
       supabase.from('categories').select('id, name').order('name').then(({ data }) => {
@@ -764,8 +774,24 @@ export default function Import() {
       supabase.from('payment_modes').select('id, name').order('name').then(({ data }) => {
         if (data) setPaymentModes(data)
       })
+      supabase.from('tags').select('id, name, color').order('name').then(({ data }) => {
+        if (data) setAllTags(data)
+      })
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Close per-row tag dropdowns and bulk tag dropdown on outside click
+  useEffect(() => {
+    function handleOutside(e: MouseEvent) {
+      const target = e.target as Element
+      if (!target.closest('[data-tag-dropdown]')) {
+        setOpenTagRow(null)
+        setOpenBulkTagDropdown(false)
+      }
+    }
+    document.addEventListener('mousedown', handleOutside)
+    return () => document.removeEventListener('mousedown', handleOutside)
+  }, [])
 
   function toggleSort(field: SortField) {
     if (sortField === field) {
@@ -933,9 +959,10 @@ export default function Import() {
     }
 
     setLoadingMsg('Loading categories, payment modes & note history…')
-    const [catResult, modeResult, noteHistoryResult, catHistoryResult] = await Promise.all([
+    const [catResult, modeResult, tagResult, noteHistoryResult, catHistoryResult] = await Promise.all([
       supabase.from('categories').select('id, name').order('name'),
       supabase.from('payment_modes').select('id, name').order('name'),
+      supabase.from('tags').select('id, name, color').order('name'),
       supabase
         .from('transactions')
         .select('merchant, notes, created_at')
@@ -954,6 +981,7 @@ export default function Import() {
     ])
     const cats = catResult.data ?? []
     setPaymentModes(modeResult.data ?? [])
+    setAllTags(tagResult.data ?? [])
 
     const merchantNoteMap = new Map<string, string>()
     for (const row of (noteHistoryResult.data ?? [])) {
@@ -997,6 +1025,7 @@ export default function Import() {
         category_id: resolvedCatId,
         spending_type: r.type === 'credit' ? 'credit' : type,
         selected: !hardDup,
+        tag_ids: [] as string[],
       }
     })
 
@@ -1046,6 +1075,33 @@ export default function Import() {
 
   function handleNewCategory(cat: Category) {
     setCategories(prev => [...prev, cat].sort((a, b) => a.name.localeCompare(b.name)))
+  }
+
+  function toggleRowTag(rowId: string, tagId: string) {
+    setRows(prev => prev.map(r => {
+      if (r.id !== rowId) return r
+      const has = r.tag_ids.includes(tagId)
+      return { ...r, tag_ids: has ? r.tag_ids.filter(t => t !== tagId) : [...r.tag_ids, tagId] }
+    }))
+  }
+
+  function bulkToggleTag(tagId: string) {
+    const isActive = bulkTagIds.has(tagId)
+    const next = new Set(bulkTagIds)
+    if (isActive) {
+      next.delete(tagId)
+      // Remove this tag from all selected visible rows
+      setRows(prev => prev.map(r =>
+        r.selected ? { ...r, tag_ids: r.tag_ids.filter(t => t !== tagId) } : r
+      ))
+    } else {
+      next.add(tagId)
+      // Add this tag to all selected visible rows
+      setRows(prev => prev.map(r =>
+        r.selected ? { ...r, tag_ids: r.tag_ids.includes(tagId) ? r.tag_ids : [...r.tag_ids, tagId] } : r
+      ))
+    }
+    setBulkTagIds(next)
   }
 
   async function commit() {
@@ -1114,11 +1170,28 @@ export default function Import() {
         }
       })
 
-      const { error: insertError } = await supabase.from('transactions').insert(records)
+      const { data: insertedTxns, error: insertError } = await supabase
+        .from('transactions')
+        .insert(records)
+        .select('id')
       setCommitting(false)
       if (insertError) {
         setError('Import failed: ' + insertError.message)
         return
+      }
+
+      // Insert transaction_tags for rows that have tag_ids
+      if (insertedTxns && insertedTxns.length > 0) {
+        const tagLinks: { transaction_id: string; tag_id: string }[] = []
+        toInsert.forEach((r, idx) => {
+          const txnId = insertedTxns[idx]?.id
+          if (txnId && r.tag_ids && r.tag_ids.length > 0) {
+            r.tag_ids.forEach(tid => tagLinks.push({ transaction_id: txnId, tag_id: tid }))
+          }
+        })
+        if (tagLinks.length > 0) {
+          await supabase.from('transaction_tags').insert(tagLinks)
+        }
       }
 
       // Save to batch history for undo
@@ -1664,11 +1737,43 @@ export default function Import() {
                   />
                 </div>
 
+                {/* Bulk tags */}
+                {allTags.length > 0 && (
+                  <div className="flex items-center gap-1.5 relative" data-tag-dropdown>
+                    <span className="text-[10px] text-gray-400 uppercase tracking-wide">Tags:</span>
+                    <button
+                      onClick={() => setOpenBulkTagDropdown(v => !v)}
+                      className="text-xs bg-[#3D3D3D] text-white border border-[#555] rounded-lg px-2 py-1 hover:border-[#7FA68A] transition-all flex items-center gap-1"
+                    >
+                      {bulkTagIds.size > 0 ? `${bulkTagIds.size} tag${bulkTagIds.size > 1 ? 's' : ''}` : '— pick —'}
+                      <ChevronDown size={10} className="text-gray-400" />
+                    </button>
+                    {openBulkTagDropdown && (
+                      <div className="absolute left-0 top-full mt-1 z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-2 min-w-[140px]">
+                        {allTags.map(tag => {
+                          const active = bulkTagIds.has(tag.id)
+                          return (
+                            <button
+                              key={tag.id}
+                              onClick={() => bulkToggleTag(tag.id)}
+                              className={`flex items-center gap-2 w-full text-left px-2 py-1 rounded-lg text-xs transition-all hover:bg-gray-50 ${active ? 'font-medium' : ''}`}
+                            >
+                              <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: tag.color }} />
+                              <span className="text-gray-800">{tag.name}</span>
+                              {active && <span className="ml-auto text-[#7FA68A]">✓</span>}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+
               </div>
 
               {/* Reset bulk selectors */}
               <button
-                onClick={() => { setBulkCategory(''); setBulkSpendingType(''); setBulkAccount(''); setBulkSource(''); setBulkType(''); setBulkDate('') }}
+                onClick={() => { setBulkCategory(''); setBulkSpendingType(''); setBulkAccount(''); setBulkSource(''); setBulkType(''); setBulkDate(''); setBulkTagIds(new Set()); setOpenBulkTagDropdown(false) }}
                 className="ml-auto text-[10px] text-gray-500 hover:text-gray-300 underline flex-shrink-0 transition-all"
               >
                 Reset selectors
@@ -1733,6 +1838,7 @@ export default function Import() {
                   <col style={{ width: colWidths.notes }} />
                   <col style={{ width: colWidths.amount }} />
                   <col style={{ width: colWidths.category }} />
+                  <col style={{ width: colWidths.tags }} />
                   <col style={{ width: colWidths.type }} />
                   <col style={{ width: colWidths.source }} />
                   <col style={{ width: colWidths.account }} />
@@ -1768,6 +1874,10 @@ export default function Import() {
                         <ColumnFilterBtn colKey="category_id" displayLabel={v => categories.find(c => c.id === v)?.name ?? v} />
                       </div>
                       <ResizeHandle currentWidth={colWidths.category} onWidthChange={w => updateColWidth('category', w)} />
+                    </th>
+                    <th className="px-3 py-3 text-left relative overflow-hidden" style={{ width: colWidths.tags }}>
+                      Tags
+                      <ResizeHandle currentWidth={colWidths.tags} onWidthChange={w => updateColWidth('tags', w)} />
                     </th>
                     <th className="px-3 py-3 text-left relative overflow-hidden" style={{ width: colWidths.type }}>
                       <div className="flex items-center gap-1">
@@ -1848,6 +1958,50 @@ export default function Import() {
                           onNewCategory={handleNewCategory}
                         />
                       </td>
+                      <td className="px-3 py-2.5 relative" data-tag-dropdown>
+                        <div className="flex flex-wrap gap-1 items-center min-h-[24px]">
+                          {(row.tag_ids ?? []).map(tid => {
+                            const tag = allTags.find(t => t.id === tid)
+                            if (!tag) return null
+                            return (
+                              <span key={tid}
+                                className="inline-flex items-center gap-0.5 text-[10px] font-medium px-1.5 py-0.5 rounded-full cursor-pointer hover:opacity-80"
+                                style={{ backgroundColor: tag.color + '33', color: tag.color, border: `1px solid ${tag.color}66` }}
+                                onClick={() => toggleRowTag(row.id, tid)}
+                                title="Click to remove"
+                              >
+                                {tag.name} ×
+                              </span>
+                            )
+                          })}
+                          {allTags.length > 0 && (
+                            <button
+                              onClick={() => setOpenTagRow(openTagRow === row.id ? null : row.id)}
+                              className="text-[10px] text-gray-300 hover:text-[#7FA68A] border border-dashed border-gray-200 hover:border-[#7FA68A] rounded-full px-1.5 py-0.5 transition-all"
+                            >
+                              + tag
+                            </button>
+                          )}
+                          {openTagRow === row.id && (
+                            <div className="absolute left-0 top-full mt-1 z-50 bg-white border border-gray-200 rounded-xl shadow-lg p-2 min-w-[140px]">
+                              {allTags.map(tag => {
+                                const active = (row.tag_ids ?? []).includes(tag.id)
+                                return (
+                                  <button
+                                    key={tag.id}
+                                    onClick={() => { toggleRowTag(row.id, tag.id); setOpenTagRow(null) }}
+                                    className={`flex items-center gap-2 w-full text-left px-2 py-1 rounded-lg text-xs transition-all hover:bg-gray-50 ${active ? 'font-medium' : ''}`}
+                                  >
+                                    <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: tag.color }} />
+                                    <span>{tag.name}</span>
+                                    {active && <span className="ml-auto text-[#7FA68A]">✓</span>}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-3 py-2.5">
                         <select className="text-xs border border-gray-200 rounded-lg px-2 py-1 bg-white outline-none focus:border-[#7FA68A]"
                           value={row.spending_type}
@@ -1912,7 +2066,7 @@ export default function Import() {
                   ))}
                   {visibleRows.length === 0 && (
                     <tr>
-                      <td colSpan={11} className="px-3 py-8 text-center text-sm text-gray-400">
+                      <td colSpan={12} className="px-3 py-8 text-center text-sm text-gray-400">
                         No rows match the current filters.
                       </td>
                     </tr>
