@@ -414,17 +414,25 @@ function detectAndParse(text: string, accounts: SourceAccount[]): Omit<ParsedRow
 
 // ── Auto-categorisation rules ─────────────────────────────────────────────────
 
+// CC payment / self-transfer detection — checked BEFORE the main rules
+// Matches CRED autopay, "credit card bill", "card payment", etc.
+const CC_PAYMENT_PATTERN = /\bcred\b|credit.?card.?(bill|pay|payment|autopay)|card.?bill|autopay.*card|cc.?bill|cc.?pay|axis.*card.*pay|hdfc.*card.*pay|icici.*card.*pay|kotak.*card.*pay|sbi.*card.*pay|amex.*pay|indusind.*card.*pay/i
+
 const RULES: { pattern: RegExp; category: string; type: 'necessary' | 'unnecessary' }[] = [
   { pattern: /swiggy|zomato|domino|pizza|burger|mcdon|kfc|biryani|cafe|bakery|restaurant|food|dining|diner|eat/i, category: 'Dining', type: 'unnecessary' },
   { pattern: /blinkit|bigbasket|grocer|vegetable|fruit|maligai|super.?market|provision/i, category: 'Groceries', type: 'necessary' },
   { pattern: /netflix|spotify|apple media|amazon prime|hotstar|jio|airtel|vodafone|vi |recharge|myjio|subscription/i, category: 'Subscriptions', type: 'unnecessary' },
   { pattern: /uber|ola|rapido|bmtc|bus|metro|auto|cab|transport|petrol|fuel|parking/i, category: 'Transport', type: 'necessary' },
-  { pattern: /electricity|water|gas|bill|utility|mobile|phone|internet|broadband/i, category: 'Utility', type: 'necessary' },
+  { pattern: /electricity|water|gas|utility|mobile|phone|internet|broadband/i, category: 'Utility', type: 'necessary' },
   { pattern: /medical|pharmacy|chemist|hospital|doctor|clinic|dental|health/i, category: 'Health', type: 'necessary' },
   { pattern: /amazon|flipkart|myntra|shopping|store|mall|fashion|clothes|shoes/i, category: 'Shopping', type: 'unnecessary' },
   { pattern: /gift|flowers|jewel|wedding|birthday/i, category: 'Gifting', type: 'unnecessary' },
   { pattern: /mutual fund|groww|zerodha|iccl|investment|sip/i, category: 'Investments', type: 'necessary' },
 ]
+
+function isCCPayment(desc: string): boolean {
+  return CC_PAYMENT_PATTERN.test(desc)
+}
 
 function autoCategory(desc: string): { category: string; type: 'necessary' | 'unnecessary' } {
   for (const rule of RULES) {
@@ -1002,7 +1010,11 @@ export default function Import() {
       merchantCatMap.set(merchant, row.category_id)
     }
 
+    // Find or note the "CC Payment" category id for auto-tagging self-transfers
+    const ccPayCat = cats.find(c => c.name.toLowerCase() === 'cc payment' || c.name.toLowerCase() === 'credit card payment')
+
     const withMeta: ParsedRow[] = parsed.map(r => {
+      const ccPay = isCCPayment(r.description)
       const { category, type } = autoCategory(r.description)
       const keywordCat = cats.find(c => c.name === category)
 
@@ -1011,7 +1023,13 @@ export default function Import() {
       const memoryCatId = merchantCatMap.get(merchantKey) ?? ''
       // Verify the remembered cat_id still exists
       const memoryCatValid = memoryCatId && cats.some(c => c.id === memoryCatId)
-      const resolvedCatId = memoryCatValid ? memoryCatId : (keywordCat?.id ?? '')
+
+      // CC payment rows: override category to "CC Payment" cat (if it exists) and force spending_type credit
+      const resolvedCatId = ccPay
+        ? (ccPayCat?.id ?? memoryCatId ?? '')
+        : memoryCatValid ? memoryCatId : (keywordCat?.id ?? '')
+
+      const resolvedSpendingType: ParsedRow['spending_type'] = ccPay || r.type === 'credit' ? 'credit' : type
 
       const suggestedNote = r.note || merchantNoteMap.get(merchantKey) || ''
       const hardDup = existingUtrs.has(r.utrNo)
@@ -1023,7 +1041,7 @@ export default function Import() {
         isSoftDuplicate: !hardDup && softDupMatch !== null,
         softDupMatch,
         category_id: resolvedCatId,
-        spending_type: r.type === 'credit' ? 'credit' : type,
+        spending_type: resolvedSpendingType,
         selected: !hardDup,
         tag_ids: [] as string[],
       }
